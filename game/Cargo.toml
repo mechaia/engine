@@ -1,0 +1,10 @@
+[package]
+name = "game"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glam = "0.26.0"
+gltf = { version = "1.4.0", features = ["utils"] }
+render = { path = "../render", package = "mechaia_render" }
+winit = "0.28"

@@ -1,0 +1,346 @@
+use ash::vk::{self, PipelineLayoutCreateFlags};
+use core::ffi::CStr;
+use vk_shader_macros::include_glsl;
+
+const ENTRY_POINT: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
+
+pub struct DrawFunction {
+    pub(super) render_pass: vk::RenderPass,
+    pub(super) compute_pipeline: ComputePipeline,
+    pub(super) graphics_pipeline: GraphicsPipeline,
+}
+
+pub(super) struct ComputePipeline {
+    pub(super) pipeline: vk::Pipeline,
+    pub(super) layout: vk::PipelineLayout,
+    pub(super) descriptor_set_layout: vk::DescriptorSetLayout,
+}
+
+pub(super) struct GraphicsPipeline {
+    pub(super) pipeline: vk::Pipeline,
+    pub(super) layout: vk::PipelineLayout,
+    pub(super) descriptor_set_layout: vk::DescriptorSetLayout,
+}
+
+impl DrawFunction {
+    pub unsafe fn new(dev: &ash::Device, format: vk::Format) -> Self {
+        let render_pass = make_render_pass(dev, format);
+        let compute_pipeline = make_compute_pipeline(dev);
+        let graphics_pipeline = make_graphics_pipeline(dev, render_pass);
+        Self {
+            render_pass,
+            compute_pipeline,
+            graphics_pipeline,
+        }
+    }
+
+    // FIXME get a better understanding of renderpasses + framebuffers so we can handle
+    // this properly.
+    //
+    // The biggest issue now is that the renderpass properties clearly depend on the
+    // pipeline, yet renderpass needs to be attached to a swapchain of which there
+    // is only one.
+    pub fn render_pass(&self) -> vk::RenderPass {
+        self.render_pass
+    }
+}
+
+unsafe fn make_render_pass(dev: &ash::Device, format: vk::Format) -> vk::RenderPass {
+    let attachments = [
+        vk::AttachmentDescription {
+            flags: vk::AttachmentDescriptionFlags::empty(),
+            format,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            samples: vk::SampleCountFlags::TYPE_1,
+        },
+        vk::AttachmentDescription {
+            flags: vk::AttachmentDescriptionFlags::empty(),
+            format: vk::Format::D32_SFLOAT,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::DONT_CARE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            samples: vk::SampleCountFlags::TYPE_1,
+        },
+    ];
+    let color_attachments = [vk::AttachmentReference {
+        attachment: 0,
+        layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+    }];
+    let depth_attachment = vk::AttachmentReference {
+        attachment: 1,
+        layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+    let subpasses = [vk::SubpassDescription::builder()
+        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+        .color_attachments(&color_attachments)
+        .depth_stencil_attachment(&depth_attachment)
+        .build()];
+    let subpass_dependencies = [vk::SubpassDependency::builder()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .src_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        )
+        .dst_subpass(0)
+        .dst_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        )
+        .dst_access_mask(
+            vk::AccessFlags::COLOR_ATTACHMENT_READ
+                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        )
+        .build()];
+    let info = vk::RenderPassCreateInfo::builder()
+        .attachments(&attachments)
+        .subpasses(&subpasses)
+        .dependencies(&subpass_dependencies);
+    dev.create_render_pass(&info, None).unwrap()
+}
+
+unsafe fn make_shader(dev: &ash::Device, code: &[u32]) -> vk::ShaderModule {
+    let info = vk::ShaderModuleCreateInfo::builder().code(code);
+    dev.create_shader_module(&info, None).unwrap()
+}
+
+unsafe fn make_compute_pipeline(dev: &ash::Device) -> ComputePipeline {
+    let instance_shader = make_shader(dev, include_glsl!("instance.glsl", kind: comp));
+    let stage = vk::PipelineShaderStageCreateInfo::builder()
+        .stage(vk::ShaderStageFlags::COMPUTE)
+        .module(instance_shader)
+        .name(ENTRY_POINT)
+        .build();
+
+    let descriptor_set_layout = {
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                .build(),
+        ];
+        let info = vk::DescriptorSetLayoutCreateInfo::builder()
+            .flags(vk::DescriptorSetLayoutCreateFlags::empty())
+            .bindings(&bindings);
+        dev.create_descriptor_set_layout(&info, None).unwrap()
+    };
+    let layout = {
+        let layouts = [descriptor_set_layout];
+        let info = vk::PipelineLayoutCreateInfo::builder()
+            .flags(PipelineLayoutCreateFlags::empty())
+            .set_layouts(&layouts);
+        dev.create_pipeline_layout(&info, None).unwrap()
+    };
+
+    let info = Vec::from([vk::ComputePipelineCreateInfo::builder()
+        .flags(vk::PipelineCreateFlags::empty())
+        .stage(stage)
+        .layout(layout)
+        .build()]);
+    let pipeline = dev
+        .create_compute_pipelines(vk::PipelineCache::null(), &info, None)
+        .unwrap()[0];
+
+    dev.destroy_shader_module(instance_shader, None);
+
+    ComputePipeline {
+        pipeline,
+        layout,
+        descriptor_set_layout,
+    }
+}
+
+unsafe fn make_graphics_pipeline(
+    dev: &ash::Device,
+    render_pass: vk::RenderPass,
+) -> GraphicsPipeline {
+    let vertex_shader = make_shader(dev, include_glsl!("vertex.glsl", kind: vert));
+    let fragment_shader = make_shader(dev, include_glsl!("fragment.glsl", kind: frag));
+
+    let shader_stages = [
+        vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vertex_shader)
+            .name(ENTRY_POINT)
+            .build(),
+        vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fragment_shader)
+            .name(ENTRY_POINT)
+            .build(),
+    ];
+    let vec = |bindloc: u32, format: vk::Format| vk::VertexInputAttributeDescription {
+        binding: bindloc,
+        location: bindloc,
+        format,
+        offset: 0,
+    };
+    let mat4 = |column: u32| vk::VertexInputAttributeDescription {
+        binding: 3,
+        location: 3 + column,
+        format: vk::Format::R32G32B32A32_SFLOAT,
+        offset: column * 16,
+    };
+    let attr_descrs = [
+        // position
+        vec(0, vk::Format::R32G32B32_SFLOAT),
+        // normal
+        vec(1, vk::Format::R32G32B32_SFLOAT),
+        // uv
+        vec(2, vk::Format::R32G32_SFLOAT),
+        // transform (mat4)
+        mat4(0),
+        mat4(1),
+        mat4(2),
+        mat4(3),
+    ];
+    let vert = |binding, floats: u32| vk::VertexInputBindingDescription {
+        binding,
+        stride: floats * 4,
+        input_rate: vk::VertexInputRate::VERTEX,
+    };
+    let binding_descrs = [
+        vert(0, 3),
+        vert(1, 3),
+        vert(2, 2),
+        vk::VertexInputBindingDescription {
+            binding: 3,
+            stride: 64,
+            input_rate: vk::VertexInputRate::INSTANCE,
+        },
+    ];
+    let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
+        .vertex_attribute_descriptions(&attr_descrs)
+        .vertex_binding_descriptions(&binding_descrs);
+    let input_assembly_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    // set to default as we'll set it in the commands instead.
+    let viewports = [vk::Viewport::default()];
+    let scissors = [vk::Rect2D::default()];
+    let viewport_info = vk::PipelineViewportStateCreateInfo::builder()
+        .viewports(&viewports)
+        .scissors(&scissors);
+    let rasterizer_info = vk::PipelineRasterizationStateCreateInfo::builder()
+        .line_width(1.0)
+        .front_face(vk::FrontFace::CLOCKWISE)
+        .cull_mode(vk::CullModeFlags::BACK)
+        .polygon_mode(vk::PolygonMode::FILL);
+    let multisampler_info = vk::PipelineMultisampleStateCreateInfo::builder()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let colorblend_attachments = [vk::PipelineColorBlendAttachmentState::builder()
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(vk::BlendOp::ADD)
+        .color_write_mask(
+            vk::ColorComponentFlags::R
+                | vk::ColorComponentFlags::G
+                | vk::ColorComponentFlags::B
+                | vk::ColorComponentFlags::A,
+        )
+        .build()];
+    let colorblend_info =
+        vk::PipelineColorBlendStateCreateInfo::builder().attachments(&colorblend_attachments);
+
+    let descriptor_set_layout = {
+        /*
+        let bindings = [vk::DescriptorSetLayoutBinding::builder()
+            .binding(3)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            .build()];
+        */
+        let bindings = [vk::DescriptorSetLayoutBinding::builder()
+            // FIXME the validation layers segfault if you set the binding to something
+            // like .binding(4) here and in the shader,
+            // then do update_descriptor_sets on binding 0
+            //
+            // We should report it
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            .build()];
+        let info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
+        dev.create_descriptor_set_layout(&info, None).unwrap()
+    };
+
+    let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::builder()
+        .depth_test_enable(true)
+        .depth_write_enable(true)
+        .depth_compare_op(vk::CompareOp::LESS);
+
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state =
+        vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
+
+    let layout = {
+        let layouts = [descriptor_set_layout];
+        let push_constant_ranges = [
+            // vec2 inv_viewport
+            // float viewport_y_over_x
+            vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::FRAGMENT,
+                offset: 0,
+                size: 4 * 3,
+            },
+        ];
+        let info = vk::PipelineLayoutCreateInfo::builder()
+            .set_layouts(&layouts)
+            .push_constant_ranges(&push_constant_ranges);
+        dev.create_pipeline_layout(&info, None).unwrap()
+    };
+
+    let pipeline_info = [vk::GraphicsPipelineCreateInfo::builder()
+        .stages(&shader_stages)
+        .vertex_input_state(&vertex_input_info)
+        .input_assembly_state(&input_assembly_info)
+        .viewport_state(&viewport_info)
+        .rasterization_state(&rasterizer_info)
+        .multisample_state(&multisampler_info)
+        .color_blend_state(&colorblend_info)
+        .layout(layout)
+        .render_pass(render_pass)
+        .subpass(0)
+        .depth_stencil_state(&depth_stencil_state)
+        .dynamic_state(&dynamic_state)
+        .build()];
+    let pipeline = dev
+        .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
+        .unwrap()[0];
+
+    dev.destroy_shader_module(fragment_shader, None);
+    dev.destroy_shader_module(vertex_shader, None);
+
+    GraphicsPipeline {
+        pipeline,
+        layout,
+        descriptor_set_layout,
+    }
+}

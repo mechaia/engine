@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+	"render",
+	"vehicle",
+	"terrain",
+	"game",
+	"util",
+]
