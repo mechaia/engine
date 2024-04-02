@@ -2,6 +2,7 @@ mod camera;
 mod command;
 mod descriptor;
 mod draw;
+mod material;
 mod mesh;
 mod queues;
 mod render_pass;
@@ -12,7 +13,7 @@ pub use mesh::Mesh;
 use ash::vk;
 use core::{ffi::CStr, mem, num::NonZeroU32, ptr::NonNull};
 use raw_window_handle::HasRawDisplayHandle;
-use std::backtrace::Backtrace;
+use std::{backtrace::Backtrace, borrow::Cow};
 use vk_mem::{Alloc, AllocatorCreateInfo};
 
 const TIMEOUT: u64 = 100_000_000;
@@ -430,6 +431,27 @@ pub struct MemoryRead {
     alloc: vk_mem::Allocation,
 }
 
+pub struct MakeFunction<'a> {
+    inputs: (),
+    outputs: (),
+    stages: &'a [FunctionStage<'a>],
+    edges: &'a [(usize, usize)],
+}
+
+pub enum FunctionStage<'a> {
+    Compute {
+        shader: &'a [u32],
+    },
+    Graphics {
+        vertex_shader: &'a [u32],
+        fragment_shader: &'a [u32],
+    },
+}
+
+/// Parameters for the default PBR function.
+pub const PBR: MakeFunction<'static> = MakeFunction {
+};
+
 impl Vulkan {
     /// Allocate memory to transfer data to the GPU.
     ///
@@ -494,27 +516,6 @@ impl Vulkan {
         MemoryWrite { alloc }
     }
 
-    /// Free previously allocated memory.
-    ///
-    /// # SAFETY
-    ///
-    /// The memory must have been allocated from this instance.
-    #[allow(unused)]
-    pub unsafe fn free_memory_read(&mut self, mut memory: MemoryRead) {
-        unreachable!()
-    }
-
-    /// Free previously allocated memory.
-    ///
-    /// # SAFETY
-    ///
-    /// The memory must have been allocated from this instance.
-    pub unsafe fn free_memory_write(&mut self, mut memory: MemoryWrite) {
-        self.allocator.unmap_memory(&mut memory.alloc);
-        self.allocator.free_memory(&mut memory.alloc);
-        mem::forget(memory);
-    }
-
     pub fn memory_start_write<'a>(&'a mut self, memory: &'a mut MemoryWrite) -> MemoryWriter<'a> {
         MemoryWriter::new(memory, &self.allocator)
     }
@@ -531,6 +532,7 @@ impl Vulkan {
                 meshes,
                 max_instances,
                 &self.camera,
+                self.commands.queues.graphics,
             )
         };
         self.draw_closures.push(Some(closure));

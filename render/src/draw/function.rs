@@ -172,12 +172,181 @@ unsafe fn make_compute_pipeline(dev: &ash::Device) -> ComputePipeline {
     }
 }
 
+/// some experimental stuff for nicer pipeline descriptions
+mod description {
+    pub struct MakeGraphicsPipeline<'a> {
+        pub vertex_shader: &'a [u32],
+        pub fragment_shader: &'a [u32],
+        pub inputs: MakeGraphicsPipelineInputs<'a>,
+        pub bindings: &'a [MakeGraphicsPipelineBinding<'a>],
+    }
+
+    pub struct MakeGraphicsPipelineInputs<'a> {
+        pub vertex: &'a [&'a [Type]],
+        pub instance: &'a [&'a [Type]],
+    }
+
+    pub struct MakeGraphicsPipelineBinding<'a> {
+        pub data: MakeGraphicsPipelineBindingData<'a>,
+        pub count: u32,
+        pub in_vertex: bool,
+        pub in_fragment: bool,
+    }
+
+    pub enum MakeGraphicsPipelineBindingData<'a> {
+        UniformBuffer(&'a [Type]),
+        StorageBuffer(&'a [Type]),
+        Image,
+    }
+
+    pub enum Type {
+        F32,
+        F32_2,
+        F32_3,
+        F32_4,
+        F32_4_4,
+        U32,
+    }
+
+    impl Type {
+        pub fn format(&self) -> ash::vk::Format {
+            use ash::vk::Format;
+            match self {
+                Self::F32 => Format::R32_SFLOAT,
+                Self::F32_2 => Format::R32G32_SFLOAT,
+                Self::F32_3 => Format::R32G32B32_SFLOAT,
+                Self::F32_4 | Self::F32_4_4 => Format::R32G32B32A32_SFLOAT,
+                Self::U32 => Format::R32_UINT,
+            }
+        }
+
+        pub fn format_byte_size(&self) -> u32 {
+            match self {
+                Self::F32 | Self::U32 => 4,
+                Self::F32_2 => 8,
+                Self::F32_3 => 12,
+                Self::F32_4 | Self::F32_4_4 => 16,
+            }
+        }
+
+        pub fn count(&self) -> usize {
+            match self {
+                Self::F32 | Self::F32_2 | Self::F32_3 | Self::F32_4 | Self::U32 => 1,
+                Self::F32_4_4 => 4,
+            }
+        }
+    }
+}
+
 unsafe fn make_graphics_pipeline(
     dev: &ash::Device,
     render_pass: vk::RenderPass,
 ) -> GraphicsPipeline {
-    let vertex_shader = make_shader(dev, include_glsl!("vertex.glsl", kind: vert));
-    let fragment_shader = make_shader(dev, include_glsl!("fragment.glsl", kind: frag));
+    use description::*;
+
+    let args = if false {
+        MakeGraphicsPipeline {
+            vertex_shader: include_glsl!("vertex.glsl", kind: vert),
+            fragment_shader: include_glsl!("fragment.glsl", kind: frag),
+            inputs: MakeGraphicsPipelineInputs {
+                // position, normal, uv
+                vertex: &[&[Type::F32_3], &[Type::F32_3], &[Type::F32_2]],
+                // model to NDC
+                instance: &[&[Type::F32_4_4]],
+            },
+            bindings: &[MakeGraphicsPipelineBinding {
+                data: MakeGraphicsPipelineBindingData::UniformBuffer(&[Type::F32_4_4]),
+                count: 1,
+                in_vertex: false,
+                in_fragment: true,
+            }],
+        }
+    } else {
+        MakeGraphicsPipeline {
+            vertex_shader: include_glsl!("shader/pbr.vert.glsl", kind: vert),
+            fragment_shader: include_glsl!("shader/pbr.frag.glsl", kind: frag),
+            inputs: MakeGraphicsPipelineInputs {
+                // position, normal, uv
+                vertex: &[&[Type::F32_3], &[Type::F32_3], &[Type::F32_2]],
+                // material index, model to NDC,
+                // FIXME do'nt pad material index
+                instance: &[&[Type::F32_3, Type::F32, Type::F32_3, Type::U32], &[Type::F32_4_4]],
+            },
+            bindings: &[
+                // transform
+                MakeGraphicsPipelineBinding {
+                    data: MakeGraphicsPipelineBindingData::UniformBuffer(&[Type::F32_4_4]),
+                    count: 1,
+                    in_vertex: true,
+                    in_fragment: false,
+                },
+                // albedo texture
+                MakeGraphicsPipelineBinding {
+                    data: MakeGraphicsPipelineBindingData::Image,
+                    count: 1,
+                    in_vertex: false,
+                    in_fragment: true,
+                },
+                // roughness texture
+                MakeGraphicsPipelineBinding {
+                    data: MakeGraphicsPipelineBindingData::Image,
+                    count: 1,
+                    in_vertex: false,
+                    in_fragment: true,
+                },
+                // metallic texture
+                MakeGraphicsPipelineBinding {
+                    data: MakeGraphicsPipelineBindingData::Image,
+                    count: 1,
+                    in_vertex: false,
+                    in_fragment: true,
+                },
+                // ambient occlusion texture
+                MakeGraphicsPipelineBinding {
+                    data: MakeGraphicsPipelineBindingData::Image,
+                    count: 1,
+                    in_vertex: false,
+                    in_fragment: true,
+                },
+                // material
+                MakeGraphicsPipelineBinding {
+                    data: MakeGraphicsPipelineBindingData::StorageBuffer(&[
+                        // uv
+                        Type::F32_2,
+                        Type::F32_2,
+                        // albedo
+                        Type::F32_3,
+                        Type::U32,
+                        // roughness
+                        Type::F32,
+                        Type::U32,
+                        // metallic
+                        Type::F32,
+                        Type::U32,
+                        // ambient occlusion
+                        Type::F32,
+                        Type::U32,
+                    ]),
+                    count: 1,
+                    in_vertex: false,
+                    in_fragment: true,
+                },
+                // directional light
+                MakeGraphicsPipelineBinding {
+                    data: MakeGraphicsPipelineBindingData::StorageBuffer(&[
+                        Type::F32_3,
+                        Type::F32_3,
+                    ]),
+                    count: 1,
+                    in_vertex: false,
+                    in_fragment: true,
+                },
+            ],
+        }
+    };
+
+    let vertex_shader = make_shader(dev, args.vertex_shader);
+    let fragment_shader = make_shader(dev, args.fragment_shader);
 
     let shader_stages = [
         vk::PipelineShaderStageCreateInfo::builder()
@@ -191,46 +360,37 @@ unsafe fn make_graphics_pipeline(
             .name(ENTRY_POINT)
             .build(),
     ];
-    let vec = |bindloc: u32, format: vk::Format| vk::VertexInputAttributeDescription {
-        binding: bindloc,
-        location: bindloc,
-        format,
-        offset: 0,
-    };
-    let mat4 = |column: u32| vk::VertexInputAttributeDescription {
-        binding: 3,
-        location: 3 + column,
-        format: vk::Format::R32G32B32A32_SFLOAT,
-        offset: column * 16,
-    };
-    let attr_descrs = [
-        // position
-        vec(0, vk::Format::R32G32B32_SFLOAT),
-        // normal
-        vec(1, vk::Format::R32G32B32_SFLOAT),
-        // uv
-        vec(2, vk::Format::R32G32_SFLOAT),
-        // transform (mat4)
-        mat4(0),
-        mat4(1),
-        mat4(2),
-        mat4(3),
-    ];
-    let vert = |binding, floats: u32| vk::VertexInputBindingDescription {
-        binding,
-        stride: floats * 4,
-        input_rate: vk::VertexInputRate::VERTEX,
-    };
-    let binding_descrs = [
-        vert(0, 3),
-        vert(1, 3),
-        vert(2, 2),
-        vk::VertexInputBindingDescription {
-            binding: 3,
-            stride: 64,
-            input_rate: vk::VertexInputRate::INSTANCE,
-        },
-    ];
+
+    let mut attr_descrs = Vec::new();
+    let mut binding_descrs = Vec::new();
+    let mut binding @ mut location = 0;
+    for (input_rate, list) in [
+        (vk::VertexInputRate::VERTEX, args.inputs.vertex),
+        (vk::VertexInputRate::INSTANCE, args.inputs.instance),
+    ] {
+        for v_inputs in list {
+            let mut offset = 0;
+            for v_input in v_inputs.iter() {
+                for format in core::iter::repeat(v_input.format()).take(v_input.count()) {
+                    attr_descrs.push(vk::VertexInputAttributeDescription {
+                        binding,
+                        location,
+                        format,
+                        offset,
+                    });
+                    location += 1;
+                    offset += v_input.format_byte_size();
+                }
+            }
+            binding_descrs.push(vk::VertexInputBindingDescription {
+                binding,
+                stride: offset,
+                input_rate,
+            });
+            binding += 1;
+        }
+    }
+
     let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
         .vertex_attribute_descriptions(&attr_descrs)
         .vertex_binding_descriptions(&binding_descrs);
@@ -250,6 +410,8 @@ unsafe fn make_graphics_pipeline(
     let multisampler_info = vk::PipelineMultisampleStateCreateInfo::builder()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let colorblend_attachments = [vk::PipelineColorBlendAttachmentState::builder()
+        .blend_enable(false)
+        /*
         .blend_enable(true)
         .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
         .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
@@ -257,6 +419,7 @@ unsafe fn make_graphics_pipeline(
         .src_alpha_blend_factor(vk::BlendFactor::SRC_ALPHA)
         .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
         .alpha_blend_op(vk::BlendOp::ADD)
+        */
         .color_write_mask(
             vk::ColorComponentFlags::R
                 | vk::ColorComponentFlags::G
@@ -267,26 +430,63 @@ unsafe fn make_graphics_pipeline(
     let colorblend_info =
         vk::PipelineColorBlendStateCreateInfo::builder().attachments(&colorblend_attachments);
 
+    /*
+    let sampler_rgba8 = unsafe {
+        let info = vk::SamplerCreateInfo::builder()
+                            .mag_filter(vk::Filter::NEAREST)
+                            .min_filter(vk::Filter::NEAREST)
+                            .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+                            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+                            .mip_lod_bias(0.0)
+                            .anisotropy_enable(false)
+                            .compare_enable(false)
+                            .compare_op(vk::CompareOp::NEVER)
+                            .border_color(vk::BorderColor::FLOAT_OPAQUE_BLACK)
+                            .unnormalized_coordinates(false);
+        dev.create_sampler(&info, None).unwrap()
+    };
+    let samplers = [sampler_rgba8];
+    */
+
     let descriptor_set_layout = {
-        /*
-        let bindings = [vk::DescriptorSetLayoutBinding::builder()
-            .binding(3)
-            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
-            .build()];
-        */
-        let bindings = [vk::DescriptorSetLayoutBinding::builder()
-            // FIXME the validation layers segfault if you set the binding to something
-            // like .binding(4) here and in the shader,
-            // then do update_descriptor_sets on binding 0
-            //
-            // We should report it
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
-            .build()];
+        let mut bindings = Vec::new();
+        let mut binding = 0;
+        for b in args.bindings.iter() {
+            let mut stage_flags = vk::ShaderStageFlags::empty();
+            if b.in_vertex {
+                stage_flags |= vk::ShaderStageFlags::VERTEX
+            }
+            if b.in_fragment {
+                stage_flags |= vk::ShaderStageFlags::FRAGMENT
+            }
+            let ty = match b.data {
+                MakeGraphicsPipelineBindingData::UniformBuffer(_) => {
+                    vk::DescriptorType::UNIFORM_BUFFER
+                }
+                MakeGraphicsPipelineBindingData::StorageBuffer(_) => {
+                    vk::DescriptorType::STORAGE_BUFFER
+                }
+                MakeGraphicsPipelineBindingData::Image => {
+                    vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+                }
+            };
+            bindings.push(
+                vk::DescriptorSetLayoutBinding::builder()
+                    // FIXME the validation layers segfault if you set the binding to something
+                    // like .binding(4) here and in the shader,
+                    // then do update_descriptor_sets on binding 0
+                    //
+                    // We should report it
+                    .binding(binding)
+                    .descriptor_type(ty)
+                    .descriptor_count(b.count)
+                    .stage_flags(stage_flags)
+                    .build(),
+            );
+            binding += 1;
+        }
         let info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
         dev.create_descriptor_set_layout(&info, None).unwrap()
     };

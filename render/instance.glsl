@@ -11,7 +11,7 @@ struct Instance {
 	uint instance;
 };
 
-layout(std430, binding = 1) readonly buffer In {
+layout(std430, binding = 1) buffer In {
 	Instance instances[];
 };
 

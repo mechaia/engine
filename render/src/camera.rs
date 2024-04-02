@@ -53,7 +53,8 @@ impl Camera {
         unsafe {
             self.buffers[index].2.as_ptr().write(CameraData {
                 matrix: m.to_cols_array(),
-                inv_matrix: m.inverse().to_cols_array(),
+                // TODO decompose so we can eliminate 0 factors in the shader
+                inv_matrix: p.inverse().to_cols_array(),
             });
         };
     }

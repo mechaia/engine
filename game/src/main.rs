@@ -16,7 +16,21 @@ fn main() {
     let mut pos = glam::Vec3::new(-10.0, 0.0, 0.0);
     let mut pan @ mut tilt = 0.0;
 
+    pos.z += 5.0;
+    tilt = -0.5;
+
     let mut go_forward @ mut go_back @ mut go_up @ mut go_down @ mut go_left @ mut go_right = false;
+
+    // -4.^C7015 -2.5587323 8.5509615, pan: -0.20700057, tilt: -0.50299996
+    /*
+    pos.x = -4.5;
+    pos.y = -2.5;
+    pos.z = 8.5;
+    pan = -0.2;
+    tilt = -0.5;
+    */
+    pos.z = 5.0;
+    tilt = -0.5;
 
     let mut aspect = {
         let size = window.inner_size();
@@ -86,10 +100,12 @@ fn main() {
             let nt = Instant::now();
             dt = nt.duration_since(t).as_secs_f32();
             print!(
-                "\rpos: {} {} {}, FPS: {}             ",
+                "\rpos: {} {} {}, pan: {}, tilt: {} FPS: {}                 ",
                 pos[0],
                 pos[1],
                 pos[2],
+                pan,
+                tilt,
                 1.0 / dt,
             );
             t = nt;
