@@ -47,7 +47,16 @@ impl Camera {
             [0.0, -1.0, 0.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ]);
-        let p = Mat4::perspective_rh(camera.fov, camera.aspect, camera.near, camera.far);
+        let p = match &camera.projection {
+            &super::CameraProjection::Perspective { fov } => {
+                Mat4::perspective_rh(fov, camera.aspect, camera.near, camera.far)
+            }
+            &super::CameraProjection::Orthographic { scale } => {
+                let x = scale;
+                let y = x * camera.aspect;
+                Mat4::orthographic_rh(-x, x, -y, y, camera.near, camera.far)
+            }
+        };
         let m = p * x * r * t;
 
         unsafe {

@@ -6,10 +6,11 @@ edition = "2021"
 [dependencies]
 ash = "0.37.3"
 ash-window = "0.12.0"
-glam = "0.26.0"
+glam = "0.27.0"
 gltf = "1.4.0"
 memoffset = "0.9.0"
 raw-window-handle = "0.5.0"
 vk-mem = "0.3.0"
 vk-shader-macros = "0.2.9"
 winit = "0.28"
+util = { path = "../util", package = "mechaia_util" }

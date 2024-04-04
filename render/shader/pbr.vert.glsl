@@ -27,5 +27,5 @@ void main() {
 	out_position = (inv_projection * gl_Position).xyz;
 	out_normal = (projection * vec4(normal, 0)).xyz;
 	out_uv = uv;
-	out_material_index = material_index;
+    out_material_index = material_index;
 }

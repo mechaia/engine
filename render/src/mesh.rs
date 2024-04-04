@@ -192,8 +192,6 @@ impl Mesh {
         for m in meshes.iter() {
             assert_eq!(m.positions.len(), m.normals.len());
             assert_eq!(m.positions.len(), m.uvs.len());
-            dbg!(&m.uvs);
-            dbg!();
         }
         meshes
     }

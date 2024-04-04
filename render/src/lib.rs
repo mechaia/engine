@@ -5,9 +5,9 @@ mod draw;
 mod material;
 mod mesh;
 mod queues;
-mod render_pass;
 mod swapchain;
 
+use glam::{Quat, UVec2, UVec3, Vec3};
 pub use mesh::Mesh;
 
 use ash::vk;
@@ -21,10 +21,15 @@ const TIMEOUT: u64 = 100_000_000;
 pub struct Camera {
     pub translation: glam::Vec3,
     pub rotation: glam::Quat,
-    pub fov: f32,
+    pub projection: CameraProjection,
     pub aspect: f32,
     pub near: f32,
     pub far: f32,
+}
+
+pub enum CameraProjection {
+    Perspective { fov: f32 },
+    Orthographic { scale: f32 },
 }
 
 type VmaBuffer = (vk::Buffer, vk_mem::Allocation);
@@ -72,8 +77,17 @@ pub struct Vulkan {
     swapchain_draw: swapchain::Draw,
     camera: camera::Camera,
     commands: command::Commands,
+    render_pass: vk::RenderPass,
+}
+
+pub struct Render {
+    vulkan: Vulkan,
+    material_set: MaterialSet,
+    mesh_sets: util::Arena<mesh::MeshCollection>,
     draw_function: draw::DrawFunction,
-    draw_closures: Vec<Option<draw::DrawClosure>>,
+    draw_closures: util::Arena<draw::DrawClosure>,
+    textures: util::Arena<(VmaImage, vk::ImageView)>,
+    materials: util::Arena<()>,
 }
 
 /*
@@ -150,7 +164,7 @@ unsafe fn swapchain_image_count(
 }
 
 impl Vulkan {
-    pub fn rebuild_swapchain(&mut self) {
+    fn rebuild_swapchain(&mut self) -> vk::Extent2D {
         unsafe {
             self.dev.device_wait_idle().unwrap();
             self.swapchain.drop_with(&self.dev, &self.allocator);
@@ -168,19 +182,10 @@ impl Vulkan {
             self.surface_format,
             self.commands.queues.graphics_index,
             &self.instance,
-            self.draw_function.render_pass(),
+            self.render_pass,
             image_count,
         );
-        for c in self.draw_closures.iter_mut().flat_map(|c| c) {
-            unsafe {
-                c.record_command(
-                    &self.dev,
-                    &self.draw_function,
-                    extent,
-                    &self.swapchain.framebuffers,
-                );
-            }
-        }
+        extent
     }
 }
 
@@ -191,7 +196,7 @@ fn select_device(instance: &ash::Instance) -> (vk::PhysicalDevice, vk::PhysicalD
     for p in phys_devs {
         let properties = unsafe { instance.get_physical_device_properties(p) };
         if properties.device_type == vk::PhysicalDeviceType::CPU {
-            //continue;
+            continue;
             chosen = Some((p, properties));
             break;
         } else if properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
@@ -204,47 +209,202 @@ fn select_device(instance: &ash::Instance) -> (vk::PhysicalDevice, vk::PhysicalD
     chosen.unwrap()
 }
 
-unsafe fn make_descriptor_pool(
-    dev: &ash::Device,
-    uniform_count: u32,
-    storage_count: u32,
-) -> vk::DescriptorPool {
-    let pool_sizes = [
-        vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::UNIFORM_BUFFER,
-            descriptor_count: uniform_count,
+unsafe fn make_render_pass(dev: &ash::Device, format: vk::Format) -> vk::RenderPass {
+    let attachments = [
+        vk::AttachmentDescription {
+            flags: vk::AttachmentDescriptionFlags::empty(),
+            format,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            samples: vk::SampleCountFlags::TYPE_1,
         },
-        vk::DescriptorPoolSize {
-            ty: vk::DescriptorType::STORAGE_BUFFER,
-            descriptor_count: storage_count,
+        vk::AttachmentDescription {
+            flags: vk::AttachmentDescriptionFlags::empty(),
+            format: vk::Format::D32_SFLOAT,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::DONT_CARE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            samples: vk::SampleCountFlags::TYPE_1,
         },
     ];
-    let info = vk::DescriptorPoolCreateInfo::builder()
-        .pool_sizes(&pool_sizes)
-        .max_sets(pool_sizes.iter().map(|p| p.descriptor_count).sum());
-    dev.create_descriptor_pool(&info, None).unwrap()
+    let color_attachments = [vk::AttachmentReference {
+        attachment: 0,
+        layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+    }];
+    let depth_attachment = vk::AttachmentReference {
+        attachment: 1,
+        layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+    let subpasses = [vk::SubpassDescription::builder()
+        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+        .color_attachments(&color_attachments)
+        .depth_stencil_attachment(&depth_attachment)
+        .build()];
+    let subpass_dependencies = [vk::SubpassDependency::builder()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .src_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        )
+        .dst_subpass(0)
+        .dst_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        )
+        .dst_access_mask(
+            vk::AccessFlags::COLOR_ATTACHMENT_READ
+                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        )
+        .build()];
+    let info = vk::RenderPassCreateInfo::builder()
+        .attachments(&attachments)
+        .subpasses(&subpasses)
+        .dependencies(&subpass_dependencies);
+    dev.create_render_pass(&info, None).unwrap()
 }
 
-unsafe fn allocate_descriptor_sets(
-    dev: &ash::Device,
+struct MaterialSet {
     pool: vk::DescriptorPool,
-    layouts: &[vk::DescriptorSetLayout],
-) -> Vec<vk::DescriptorSet> {
-    let info = vk::DescriptorSetAllocateInfo::builder()
-        .descriptor_pool(pool)
-        .set_layouts(layouts);
-    dev.allocate_descriptor_sets(&info).unwrap()
+    layout: vk::DescriptorSetLayout,
+    set: vk::DescriptorSet,
+    sampler: vk::Sampler,
+    materials: VmaBuffer,
 }
 
-pub fn init_vulkan(window: &winit::window::Window) -> Vulkan {
+unsafe fn make_material_set(
+    dev: &ash::Device,
+    alloc: &vk_mem::Allocator,
+    max_textures: u32,
+    max_materials: u32,
+) -> MaterialSet {
+    let layout = {
+        let f = |binding| {
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(binding)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(max_textures)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build()
+        };
+        let bindings = [
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(max_textures)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build(),
+        ];
+        let info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
+        dev.create_descriptor_set_layout(&info, None).unwrap()
+    };
+
+    let pool = {
+        let sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: max_textures,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 1,
+            },
+        ];
+        let info = vk::DescriptorPoolCreateInfo::builder()
+            // TODO we don't need UPDATE_AFTER_BIND, do we?
+            .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND)
+            .max_sets(1)
+            .pool_sizes(&sizes);
+        dev.create_descriptor_pool(&info, None).unwrap()
+    };
+
+    let set = {
+        let layouts = [layout];
+        let info = vk::DescriptorSetAllocateInfo::builder()
+            .descriptor_pool(pool)
+            .set_layouts(&layouts);
+        dev.allocate_descriptor_sets(&info).unwrap()[0]
+    };
+
+    let sampler = {
+        let info = vk::SamplerCreateInfo::builder()
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
+            .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .mip_lod_bias(0.0)
+            .anisotropy_enable(false)
+            .compare_enable(false)
+            .unnormalized_coordinates(false);
+        dev.create_sampler(&info, None).unwrap()
+    };
+
+    let materials = {
+        let info = vk::BufferCreateInfo::builder()
+            .size(mem::size_of::<material::PbrMaterial>() as u64 * u64::from(max_materials))
+            .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let c_info = vk_mem::AllocationCreateInfo {
+            flags: vk_mem::AllocationCreateFlags::STRATEGY_MIN_MEMORY,
+            usage: vk_mem::MemoryUsage::AutoPreferDevice,
+            ..Default::default()
+        };
+        alloc.create_buffer(&info, &c_info).unwrap()
+    };
+
+    let info = [vk::DescriptorBufferInfo {
+        buffer: materials.0,
+        offset: 0,
+        range: vk::WHOLE_SIZE,
+    }];
+    let writes = [vk::WriteDescriptorSet::builder()
+        .dst_set(set)
+        .dst_binding(1)
+        .dst_array_element(0)
+        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+        .buffer_info(&info)
+        .build()];
+    dev.update_descriptor_sets(&writes, &[]);
+
+    MaterialSet {
+        pool,
+        layout,
+        set,
+        sampler,
+        materials,
+    }
+}
+
+fn init_vulkan(window: &winit::window::Window) -> Vulkan {
     let entry = unsafe { ash::Entry::load().unwrap() };
 
     // Basic setup
-    let layer_names = [b"VK_LAYER_KHRONOS_validation\0".as_ptr() as *const i8];
-    let mut extension_names = vec![ash::extensions::ext::DebugUtils::name().as_ptr()];
+    let mut layer_names = vec![];
+    let mut extension_names = vec![];
+
     extension_names.extend_from_slice(
         ash_window::enumerate_required_extensions(window.raw_display_handle()).unwrap(),
     );
+
+    //layer_names.push(b"VK_LAYER_KHRONOS_validation\0".as_ptr() as *const i8);
+    extension_names.push(ash::extensions::ext::DebugUtils::name().as_ptr());
 
     let app_info = vk::ApplicationInfo::builder()
         .application_name(CStr::from_bytes_with_nul(b"Block Renderer\0").unwrap())
@@ -308,9 +468,7 @@ pub fn init_vulkan(window: &winit::window::Window) -> Vulkan {
 
     let commands = command::Commands::new(&dev, queues);
 
-    let draw_function = unsafe { draw::DrawFunction::new(&dev, surface_format.format) };
-
-    let draw_closures = Vec::new();
+    let render_pass = unsafe { make_render_pass(&dev, surface_format.format) };
 
     let (swapchain, extent) = swapchain::SwapChain::new(
         physical_device,
@@ -321,7 +479,7 @@ pub fn init_vulkan(window: &winit::window::Window) -> Vulkan {
         surface_format,
         commands.queues.graphics_index,
         &instance,
-        draw_function.render_pass(),
+        render_pass,
         image_count,
     );
 
@@ -345,14 +503,16 @@ pub fn init_vulkan(window: &winit::window::Window) -> Vulkan {
         swapchain_draw,
         commands,
         camera,
-        draw_function,
-        draw_closures,
+        render_pass,
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MeshSetHandle(NonZeroU32);
-
+pub struct MeshSetHandle(util::ArenaHandle);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TextureHandle(util::ArenaHandle);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PbrMaterialHandle(util::ArenaHandle);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ShaderSetHandle(NonZeroU32);
 
@@ -361,205 +521,353 @@ impl ShaderSetHandle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DrawSetHandle(NonZeroU32);
+pub struct DrawClosureHandle(util::ArenaHandle);
 
-pub struct MemoryWrite {
-    alloc: vk_mem::Allocation,
-}
-
-impl Drop for MemoryWrite {
-    fn drop(&mut self) {
-        #[cfg(debug_assertions)]
-        eprintln!("== Leaking memory! ==");
-        eprintln!("{}", Backtrace::force_capture());
-    }
-}
-
-pub struct MemoryWriter<'a> {
-    allocator: &'a vk_mem::Allocator,
-    alloc: &'a mut vk_mem::Allocation,
-    cur: NonNull<u8>,
-    end: NonNull<u8>,
-}
-
-impl<'a> MemoryWriter<'a> {
-    fn new(mem: &'a mut MemoryWrite, allocator: &'a vk_mem::Allocator) -> Self {
-        let info = allocator.get_allocation_info(&mem.alloc);
-        unsafe {
-            let ptr = allocator.map_memory(&mut mem.alloc).unwrap();
-            Self {
-                allocator,
-                alloc: &mut mem.alloc,
-                cur: NonNull::new_unchecked(ptr),
-                end: NonNull::new_unchecked(ptr.add(info.size as usize)),
-            }
-        }
+pub mod function {
+    pub struct New<'a> {
+        pub buffers: &'a [Buffer<'a>],
+        pub inputs: &'a [Input],
+        pub outputs: &'a [Output],
+        pub stages: &'a [Stage<'a>],
+        pub flow: &'a [(usize, usize)],
     }
 
-    pub fn write(&mut self, data: &[u8]) {
-        unsafe {
-            // use debug_assert to still allow coalescing writes by the compiler
-            // in release builds.
-            let max = self.end.as_ptr().offset_from(self.cur.as_ptr()) as usize;
-            debug_assert!(max <= data.len(), "writing out of bounds");
-            self.write_unchecked(&data[..data.len().min(max)]);
-        }
+    pub enum Input {
+        Buffer(usize),
     }
 
-    // Only make public if someone
-    // - can demonstrate it causes performance issues
-    // - has a real, valid usecase. Not memeshit like writing byte-by-byte
-    unsafe fn write_unchecked(&mut self, data: &[u8]) {
-        self.cur
-            .as_ptr()
-            .copy_from_nonoverlapping(data.as_ptr(), data.len());
+    pub enum Output {
+        Buffer(usize),
+        Display(usize),
     }
-}
 
-impl Drop for MemoryWriter<'_> {
-    fn drop(&mut self) {
-        unsafe {
-            self.allocator.unmap_memory(self.alloc);
-            self.allocator
-                .flush_allocation(&self.alloc, 0, ash::vk::WHOLE_SIZE as usize)
-                .unwrap();
-        }
+    pub enum Buffer<'a> {
+        Fixed { ty: &'a [Type] },
+        Array { ty: &'a [Type] },
+        DrawParameters,
+        MeshCollection,
     }
-}
 
-pub struct MemoryRead {
-    alloc: vk_mem::Allocation,
-}
+    pub enum Type {
+        F32,
+        F32_2,
+        F32_3,
+        F32_4,
+        F32_4_4,
+        U32,
+    }
 
-pub struct MakeFunction<'a> {
-    inputs: (),
-    outputs: (),
-    stages: &'a [FunctionStage<'a>],
-    edges: &'a [(usize, usize)],
-}
-
-pub enum FunctionStage<'a> {
-    Compute {
-        shader: &'a [u32],
-    },
-    Graphics {
-        vertex_shader: &'a [u32],
-        fragment_shader: &'a [u32],
-    },
+    pub enum Stage<'a> {
+        Compute {
+            shader: &'a [u32],
+            inputs: &'a [usize],
+            outputs: &'a [usize],
+            uniforms: &'a [usize],
+        },
+        Graphics {
+            vertex_shader: &'a [u32],
+            fragment_shader: &'a [u32],
+            vertex_inputs: &'a [usize],
+            instance_inputs: &'a [usize],
+            uniforms: &'a [usize],
+        },
+    }
 }
 
 /// Parameters for the default PBR function.
-pub const PBR: MakeFunction<'static> = MakeFunction {
+pub const PBR: function::New<'static> = {
+    use function::*;
+
+    New {
+        buffers: &[
+            Buffer::DrawParameters,
+            Buffer::MeshCollection,
+            Buffer::Array {
+                ty: &[Type::F32_3, Type::F32_3, Type::F32_3, Type::U32],
+            },
+            Buffer::Array {
+                ty: &[Type::F32_4_4],
+            },
+        ],
+        inputs: &[],
+        outputs: &[],
+        stages: &[
+            Stage::Compute {
+                shader: vk_shader_macros::include_glsl!("instance.glsl", kind: comp),
+                inputs: &[],
+                outputs: &[],
+                uniforms: &[],
+            },
+            Stage::Graphics {
+                vertex_shader: vk_shader_macros::include_glsl!("shader/pbr.vert.glsl", kind: vert),
+                fragment_shader: vk_shader_macros::include_glsl!("shader/pbr.frag.glsl", kind: frag),
+                vertex_inputs: &[4],
+                instance_inputs: &[],
+                uniforms: &[],
+            },
+        ],
+        flow: &[(0, 1)],
+    }
 };
 
-impl Vulkan {
-    /// Allocate memory to transfer data to the GPU.
-    ///
-    /// # Warning
-    ///
-    /// Must be manually freed with [`Self::free_memory`].
-    ///
-    /// # Details
-    ///
-    /// See https://www.khronos.org/assets/uploads/developers/library/2018-vulkan-devday/03-Memory.pdf
-    /// slide 13
-    #[allow(unused)]
-    pub fn allocate_memory_read(&mut self, size: usize, alignment: usize) -> MemoryRead {
-        todo!()
+#[derive(Clone, Copy, Debug)]
+pub enum TextureFormat {
+    Rgba8Unorm,
+    Gray8Unorm,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Rgb {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}
+
+impl Rgb {
+    pub const fn new(r: f32, g: f32, b: f32) -> Self {
+        Self { r, g, b }
     }
 
-    /// Allocate memory that is accessible by the GPU as a buffer.
-    ///
-    /// Intended for:
-    /// - Data to transfer to GPU memory.
-    /// - Data that is frequently updated by the CPU (e.g. object with rigidbody)
-    ///
-    /// If `host_cached` is `false`, then the region is optimized for CPU to GPU writes.
-    /// If `host_cached` is `true`, then the region is optimized for GPU to CPU writes.
-    ///
-    /// AVOID reading from CPU if `host_cached` is `false`.
-    /// AVOID reading from GPU if `host_cached` is `true`.
-    ///
-    /// AVOID partial writes. Prefer writing contiguous blocks.
-    ///
-    /// # Warning
-    ///
-    /// Must be manually freed with [`Self::free_memory`].
-    ///
-    /// # Details
-    ///
-    /// See https://www.khronos.org/assets/uploads/developers/library/2018-vulkan-devday/03-Memory.pdf
-    /// slide 13
-    pub fn allocate_memory_write(
-        &mut self,
-        size: usize,
-        alignment: u32,
-        host_cached: bool,
-    ) -> MemoryWrite {
-        let reqs = vk::MemoryRequirements {
-            size: size.try_into().unwrap(),
-            alignment: alignment.into(),
-            memory_type_bits: 0,
-        };
-        let info = vk_mem::AllocationCreateInfo {
-            flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-            usage: vk_mem::MemoryUsage::AutoPreferDevice,
-            required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
-            preferred_flags: if host_cached {
-                vk::MemoryPropertyFlags::HOST_CACHED
-            } else {
-                vk::MemoryPropertyFlags::empty()
-            },
-            ..Default::default()
-        };
-        let alloc = unsafe { self.allocator.allocate_memory(&reqs, &info).unwrap() };
-        MemoryWrite { alloc }
+    pub const fn to_array(&self) -> [f32; 3] {
+        [self.r, self.g, self.b]
     }
+}
 
-    pub fn memory_start_write<'a>(&'a mut self, memory: &'a mut MemoryWrite) -> MemoryWriter<'a> {
-        MemoryWriter::new(memory, &self.allocator)
+#[derive(Clone, Copy, Debug)]
+pub struct PbrMaterial {
+    pub albedo: Rgb,
+    pub roughness: f32,
+    pub metallic: f32,
+    pub ambient_occlusion: f32,
+    pub albedo_texture: TextureHandle,
+    pub roughness_texture: TextureHandle,
+    pub metallic_texture: TextureHandle,
+    pub ambient_occlusion_texture: TextureHandle,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct InstanceData {
+    pub translation: Vec3,
+    pub rotation: Quat,
+    pub material: PbrMaterialHandle,
+}
+
+impl Render {
+    pub fn new(window: &winit::window::Window) -> Self {
+        let vulkan = init_vulkan(window);
+        let material_set = unsafe { make_material_set(&vulkan.dev, &vulkan.allocator, 1024, 1024) };
+        let draw_function = unsafe {
+            draw::DrawFunction::new(
+                &vulkan.dev,
+                vulkan.surface_format.format,
+                vulkan.render_pass,
+                material_set.layout,
+            )
+        };
+        Self {
+            vulkan,
+            mesh_sets: Default::default(),
+            draw_function,
+            draw_closures: Default::default(),
+            textures: Default::default(),
+            material_set,
+            materials: Default::default(),
+        }
     }
 
     pub fn add_meshes(&mut self, meshes: &[Mesh], max_instances: u32) -> MeshSetHandle {
-        let meshes = mesh::MeshCollectionBuilder { meshes }.finish(self);
-        let closure = unsafe {
-            draw::DrawClosure::new(
-                &self.dev,
-                &self.allocator,
-                self.commands.pool,
-                &self.draw_function,
-                self.swapchain.framebuffers.len() as u32,
-                meshes,
-                max_instances,
-                &self.camera,
-                self.commands.queues.graphics,
-            )
-        };
-        self.draw_closures.push(Some(closure));
-        return MeshSetHandle(NonZeroU32::new(self.draw_closures.len() as u32).unwrap());
+        let mesh_set = mesh::MeshCollectionBuilder { meshes }.finish(&mut self.vulkan);
+        MeshSetHandle(self.mesh_sets.insert(mesh_set))
     }
 
-    pub fn make_draw_set(
+    pub fn add_texture_2d(
+        &mut self,
+        dimensions: UVec2,
+        format: TextureFormat,
+        reader: &mut dyn FnMut(&mut [u8]),
+    ) -> TextureHandle {
+        let fmt = match format {
+            TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
+            TextureFormat::Gray8Unorm => vk::Format::R8_UNORM,
+        };
+
+        let img = unsafe {
+            let info = vk::ImageCreateInfo::builder()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(fmt)
+                .extent(vk::Extent3D {
+                    width: dimensions.x,
+                    height: dimensions.y,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+            let c_info = vk_mem::AllocationCreateInfo {
+                flags: vk_mem::AllocationCreateFlags::STRATEGY_MIN_MEMORY,
+                usage: vk_mem::MemoryUsage::AutoPreferDevice,
+                ..Default::default()
+            };
+            self.vulkan.allocator.create_image(&info, &c_info).unwrap()
+        };
+
+        unsafe {
+            self.vulkan.commands.transfer_to_image_with(
+                &self.vulkan.dev,
+                &self.vulkan.allocator,
+                img.0,
+                UVec3::ZERO,
+                reader,
+                UVec3::new(dimensions.x, dimensions.y, 1),
+                fmt,
+            );
+        }
+
+        let view = unsafe {
+            let info = vk::ImageViewCreateInfo::builder()
+                .image(img.0)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(fmt)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            self.vulkan.dev.create_image_view(&info, None).unwrap()
+        };
+
+        let h = self.textures.insert((img, view));
+
+        unsafe {
+            let info = [vk::DescriptorImageInfo {
+                sampler: self.material_set.sampler,
+                image_view: view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            }];
+            let writes = [vk::WriteDescriptorSet::builder()
+                .dst_set(self.material_set.set)
+                .dst_binding(match format {
+                    TextureFormat::Rgba8Unorm => 0,
+                    TextureFormat::Gray8Unorm => todo!(),
+                })
+                .dst_array_element(h.as_u32())
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&info)
+                .build()];
+            self.vulkan.dev.update_descriptor_sets(&writes, &[]);
+        }
+
+        TextureHandle(h)
+    }
+
+    pub fn add_pbr_material(&mut self, material: &PbrMaterial) -> PbrMaterialHandle {
+        let h = self.materials.insert(());
+
+        let mat = material::PbrMaterial {
+            albedo: material.albedo.to_array(),
+            albedo_texture_index: material.albedo_texture.0.as_u32(),
+            roughness: material.roughness,
+            roughness_texture_id: material.roughness_texture.0.as_u32(),
+            metallic: material.metallic,
+            metallic_texture_id: material.metallic_texture.0.as_u32(),
+            ambient_occlusion: material.ambient_occlusion,
+            ambient_occlusion_texture_id: material.ambient_occlusion_texture.0.as_u32(),
+        };
+
+        unsafe {
+            self.vulkan.commands.transfer_to(
+                &self.vulkan.dev,
+                &self.vulkan.allocator,
+                self.material_set.materials.0,
+                u64::try_from(mem::size_of_val(&mat)).unwrap() * u64::from(h.as_u32()),
+                (&mat as *const material::PbrMaterial).cast(),
+                mem::size_of_val(&mat),
+            );
+        }
+
+        PbrMaterialHandle(h)
+    }
+
+    pub fn make_draw_closure(
         &mut self,
         mesh_set: MeshSetHandle,
         shader_set: ShaderSetHandle,
-    ) -> DrawSetHandle {
+        max_instances: u32,
+    ) -> DrawClosureHandle {
         assert_eq!(shader_set, ShaderSetHandle::PBR, "TODO: custom shaders");
-        DrawSetHandle(mesh_set.0)
+        let meshes = &self.mesh_sets[mesh_set.0];
+        let closure = unsafe {
+            draw::DrawClosure::new(
+                &self.vulkan.dev,
+                &self.vulkan.allocator,
+                self.vulkan.commands.pool,
+                &self.draw_function,
+                self.vulkan.swapchain.framebuffers.len() as u32,
+                meshes,
+                mesh_set,
+                max_instances,
+                &self.vulkan.camera,
+            )
+        };
+        DrawClosureHandle(self.draw_closures.insert(closure))
     }
 
-    pub fn draw(&mut self, camera: &Camera, draw_set: DrawSetHandle) {
+    pub fn draw(
+        &mut self,
+        camera: &Camera,
+        draw_closure: DrawClosureHandle,
+        instances_counts: &[u32],
+        instances_data: &mut dyn Iterator<Item = InstanceData>,
+    ) {
+        let closure = &mut self.draw_closures[draw_closure.0];
+
         unsafe {
-            self.swapchain
-                .draw(&self.dev, &mut self.swapchain_draw, |info| {
-                    self.camera.set(info.index, camera);
-                    self.draw_closures[0].as_ref().unwrap().submit(
-                        &self.dev,
-                        &mut self.commands,
-                        &info,
-                    );
-                    self.commands.queues.graphics
+            self.vulkan
+                .swapchain
+                .draw(&self.vulkan.dev, &mut self.vulkan.swapchain_draw, |info| {
+                    for (w, mut r) in closure
+                        .instance_data(info.index)
+                        .iter_mut()
+                        .zip(instances_data)
+                    {
+                        if r.rotation.w < 0.0 {
+                            r.rotation = -r.rotation;
+                        }
+                        *w = draw::Instance {
+                            pos: r.translation.to_array(),
+                            scale: 1.0,
+                            rot: r.rotation.xyz().to_array(),
+                            material: r.material.0.as_u32(),
+                        };
+                    }
+                    self.vulkan.camera.set(info.index, camera);
+                    closure.submit(&self.vulkan.dev, &mut self.vulkan.commands, &info);
+                    self.vulkan.commands.queues.graphics
                 });
+        }
+    }
+
+    pub fn rebuild_swapchain(&mut self) {
+        let extent = self.vulkan.rebuild_swapchain();
+        for c in self.draw_closures.iter_mut() {
+            let meshes = &self.mesh_sets[c.mesh_handle.0];
+            unsafe {
+                c.record_command(
+                    &self.vulkan.dev,
+                    &self.draw_function,
+                    meshes,
+                    self.material_set.set,
+                    extent,
+                    &self.vulkan.swapchain.framebuffers,
+                    self.vulkan.render_pass,
+                );
+            }
         }
     }
 }

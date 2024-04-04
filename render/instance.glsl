@@ -40,7 +40,7 @@ void main() {
 	uint index = gl_GlobalInvocationID.x;
 	Instance inst = instances[index];
 
-	vec4 rotation = vec4(inst.rotation, sqrt(1 - dot(inst.rotation, inst.rotation)));
+	vec4 rotation = vec4(inst.rotation, sqrt(max(0, 1 - dot(inst.rotation, inst.rotation))));
 
 	// copied from https://docs.rs/glam/0.27.0/src/glam/f32/sse2/mat4.rs.html#215-223
 	mat3 axes = quat_to_axes(rotation) * inst.scale;

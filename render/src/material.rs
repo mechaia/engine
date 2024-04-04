@@ -14,10 +14,8 @@ pub struct PbrMaterialCollection {
     pub views: Box<[PbrMaterialView]>,
 }
 
-#[repr(C)]
+#[repr(C, align(16))]
 pub(crate) struct PbrMaterialView {
-    pub uv_offset: [f32; 2],
-    pub uv_scale: [f32; 2],
     pub albedo: [f32; 3],
     pub albedo_texture_index: u32,
     pub roughness: f32,
@@ -26,10 +24,9 @@ pub(crate) struct PbrMaterialView {
     pub metallic_texture_id: u32,
     pub ambient_occlusion: f32,
     pub ambient_occlusion_texture_id: u32,
-    pub _padding: [u32; 2],
 }
 
-pub struct PbrMaterial {}
+pub type PbrMaterial = PbrMaterialView;
 
 pub(crate) struct TextureAtlas {
     texture: VmaImage,
@@ -132,13 +129,14 @@ unsafe fn create_texture_atlas(
         let data = tex.decode_to_vec();
         assert_eq!(data.len(), usize::from(pos.x) * usize::from(pos.y));
         let f = |v: UVec2| UVec3::new(v.x.into(), v.y.into(), 0);
-        vulkan.commands.transfer_to_image(
+        vulkan.commands.transfer_to_image_with(
             &vulkan.dev,
             &vulkan.allocator,
             img.0,
             f(UVec2::from(*pos)),
-            data.as_ptr(),
+            &mut |s| s.copy_from_slice(&data),
             f(tex.dim),
+            todo!(),
         );
     }
 

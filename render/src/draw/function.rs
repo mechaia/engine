@@ -5,7 +5,6 @@ use vk_shader_macros::include_glsl;
 const ENTRY_POINT: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
 
 pub struct DrawFunction {
-    pub(super) render_pass: vk::RenderPass,
     pub(super) compute_pipeline: ComputePipeline,
     pub(super) graphics_pipeline: GraphicsPipeline,
 }
@@ -23,88 +22,19 @@ pub(super) struct GraphicsPipeline {
 }
 
 impl DrawFunction {
-    pub unsafe fn new(dev: &ash::Device, format: vk::Format) -> Self {
-        let render_pass = make_render_pass(dev, format);
+    pub unsafe fn new(
+        dev: &ash::Device,
+        format: vk::Format,
+        render_pass: vk::RenderPass,
+        texture_set_layout: vk::DescriptorSetLayout,
+    ) -> Self {
         let compute_pipeline = make_compute_pipeline(dev);
-        let graphics_pipeline = make_graphics_pipeline(dev, render_pass);
+        let graphics_pipeline = make_graphics_pipeline(dev, render_pass, texture_set_layout);
         Self {
-            render_pass,
             compute_pipeline,
             graphics_pipeline,
         }
     }
-
-    // FIXME get a better understanding of renderpasses + framebuffers so we can handle
-    // this properly.
-    //
-    // The biggest issue now is that the renderpass properties clearly depend on the
-    // pipeline, yet renderpass needs to be attached to a swapchain of which there
-    // is only one.
-    pub fn render_pass(&self) -> vk::RenderPass {
-        self.render_pass
-    }
-}
-
-unsafe fn make_render_pass(dev: &ash::Device, format: vk::Format) -> vk::RenderPass {
-    let attachments = [
-        vk::AttachmentDescription {
-            flags: vk::AttachmentDescriptionFlags::empty(),
-            format,
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::STORE,
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-            samples: vk::SampleCountFlags::TYPE_1,
-        },
-        vk::AttachmentDescription {
-            flags: vk::AttachmentDescriptionFlags::empty(),
-            format: vk::Format::D32_SFLOAT,
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::DONT_CARE,
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            samples: vk::SampleCountFlags::TYPE_1,
-        },
-    ];
-    let color_attachments = [vk::AttachmentReference {
-        attachment: 0,
-        layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-    }];
-    let depth_attachment = vk::AttachmentReference {
-        attachment: 1,
-        layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    };
-    let subpasses = [vk::SubpassDescription::builder()
-        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(&color_attachments)
-        .depth_stencil_attachment(&depth_attachment)
-        .build()];
-    let subpass_dependencies = [vk::SubpassDependency::builder()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .src_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        )
-        .dst_subpass(0)
-        .dst_stage_mask(
-            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
-                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-        )
-        .dst_access_mask(
-            vk::AccessFlags::COLOR_ATTACHMENT_READ
-                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
-                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        )
-        .build()];
-    let info = vk::RenderPassCreateInfo::builder()
-        .attachments(&attachments)
-        .subpasses(&subpasses)
-        .dependencies(&subpass_dependencies);
-    dev.create_render_pass(&info, None).unwrap()
 }
 
 unsafe fn make_shader(dev: &ash::Device, code: &[u32]) -> vk::ShaderModule {
@@ -241,6 +171,7 @@ mod description {
 unsafe fn make_graphics_pipeline(
     dev: &ash::Device,
     render_pass: vk::RenderPass,
+    texture_set_layout: vk::DescriptorSetLayout,
 ) -> GraphicsPipeline {
     use description::*;
 
@@ -270,7 +201,10 @@ unsafe fn make_graphics_pipeline(
                 vertex: &[&[Type::F32_3], &[Type::F32_3], &[Type::F32_2]],
                 // material index, model to NDC,
                 // FIXME do'nt pad material index
-                instance: &[&[Type::F32_3, Type::F32, Type::F32_3, Type::U32], &[Type::F32_4_4]],
+                instance: &[
+                    &[Type::F32_3, Type::F32, Type::F32_3, Type::U32],
+                    &[Type::F32_4_4],
+                ],
             },
             bindings: &[
                 // transform
@@ -280,34 +214,7 @@ unsafe fn make_graphics_pipeline(
                     in_vertex: true,
                     in_fragment: false,
                 },
-                // albedo texture
-                MakeGraphicsPipelineBinding {
-                    data: MakeGraphicsPipelineBindingData::Image,
-                    count: 1,
-                    in_vertex: false,
-                    in_fragment: true,
-                },
-                // roughness texture
-                MakeGraphicsPipelineBinding {
-                    data: MakeGraphicsPipelineBindingData::Image,
-                    count: 1,
-                    in_vertex: false,
-                    in_fragment: true,
-                },
-                // metallic texture
-                MakeGraphicsPipelineBinding {
-                    data: MakeGraphicsPipelineBindingData::Image,
-                    count: 1,
-                    in_vertex: false,
-                    in_fragment: true,
-                },
-                // ambient occlusion texture
-                MakeGraphicsPipelineBinding {
-                    data: MakeGraphicsPipelineBindingData::Image,
-                    count: 1,
-                    in_vertex: false,
-                    in_fragment: true,
-                },
+                /*
                 // material
                 MakeGraphicsPipelineBinding {
                     data: MakeGraphicsPipelineBindingData::StorageBuffer(&[
@@ -331,6 +238,7 @@ unsafe fn make_graphics_pipeline(
                     in_vertex: false,
                     in_fragment: true,
                 },
+                */
                 // directional light
                 MakeGraphicsPipelineBinding {
                     data: MakeGraphicsPipelineBindingData::StorageBuffer(&[
@@ -501,7 +409,7 @@ unsafe fn make_graphics_pipeline(
         vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
     let layout = {
-        let layouts = [descriptor_set_layout];
+        let layouts = [descriptor_set_layout, texture_set_layout];
         let push_constant_ranges = [
             // vec2 inv_viewport
             // float viewport_y_over_x

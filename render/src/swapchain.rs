@@ -90,7 +90,7 @@ impl SwapChain {
             .queue_family_indices(&queuefamilies)
             .pre_transform(surface_capabilities.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(vk::PresentModeKHR::IMMEDIATE);
+            .present_mode(vk::PresentModeKHR::FIFO);
         //.present_mode(vk::PresentModeKHR::MAILBOX);
         //.present_mode(vk::PresentModeKHR::FIFO);
         let loader = ash::extensions::khr::Swapchain::new(&instance, &dev);

@@ -12,9 +12,9 @@ const GRAPHICS_INSTANCE_DATA_SIZE: u32 = 4 * 4 * 4;
 
 pub struct DrawClosure {
     descriptor_pool: vk::DescriptorPool,
-    meshes: MeshCollection,
     command: Box<[DrawCommand]>,
     max_instances: u32,
+    pub mesh_handle: crate::MeshSetHandle,
 }
 
 struct DrawCommand {
@@ -30,6 +30,8 @@ struct DrawCommandCompute {
     ///
     /// Set by host, so host-visible.
     data: VmaBuffer,
+    /// Pointer to mapped instance data.
+    data_ptr: *mut u8,
     /// Dispatch parameters
     ///
     /// - parameters
@@ -67,12 +69,10 @@ impl DrawClosure {
         cmd_pool: vk::CommandPool,
         function: &super::DrawFunction,
         image_count: u32,
-        meshes: MeshCollection,
+        meshes: &MeshCollection,
+        mesh_handle: crate::MeshSetHandle,
         max_instances: u32,
         camera: &crate::camera::Camera,
-
-        // FIXME BRO BRO BRO NONONO
-        Q__queue: vk::Queue,
     ) -> Self {
         let descriptor_pool = make_descriptor_pool(dev, image_count);
         let command = make_command(
@@ -85,12 +85,11 @@ impl DrawClosure {
             image_count,
             max_instances,
             &meshes,
-            Q__queue,
         );
         Self {
             descriptor_pool,
             command,
-            meshes,
+            mesh_handle,
             max_instances,
         }
     }
@@ -195,7 +194,6 @@ unsafe fn make_command(
     image_count: u32,
     max_instance_count: u32,
     meshes: &MeshCollection,
-    Q__queue: vk::Queue,
 ) -> Box<[DrawCommand]> {
     let info = vk::CommandBufferAllocateInfo::builder()
         .command_pool(cmdpool)
@@ -219,6 +217,7 @@ unsafe fn make_command(
                 false,
                 true,
             );
+            let compute_data_ptr = alloc.map_memory(&mut compute_data.1).unwrap();
             let graphics_data = alloc_storage(
                 alloc,
                 graphics_data_size(max_instance_count),
@@ -246,68 +245,6 @@ unsafe fn make_command(
                     .try_into()
                     .unwrap()
             };
-
-            {
-                #[repr(C)]
-                struct Instance {
-                    pos: [f32; 3],
-                    scale: f32,
-                    rot: [f32; 3],
-                    material: u32,
-                }
-                let p = alloc.map_memory(&mut compute_data.1).unwrap();
-                let r2a = |mut q: glam::Quat| {
-                    if q.w < 0.0 {
-                        q = -q;
-                    }
-                    q.xyz().to_array()
-                };
-                p.cast::<[Instance; 7]>().write([
-                    Instance {
-                        pos: [0.0, -2.0, 0.0],
-                        scale: 0.5,
-                        rot: [0.0; 3],
-                        material: 1,
-                    },
-                    Instance {
-                        pos: [0.0; 3],
-                        scale: 1.0,
-                        rot: r2a(glam::Quat::from_rotation_x(-1.0)),
-                        material: 0,
-                    },
-                    Instance {
-                        pos: [0.0, 4.0, 0.0],
-                        scale: 1.5,
-                        rot: r2a(glam::Quat::from_rotation_z(1.0)),
-                        material: 0,
-                    },
-                    Instance {
-                        pos: [-3.0, -2.0, 0.0],
-                        scale: 1.5,
-                        rot: [0.0; 3],
-                        material: 1,
-                    },
-                    Instance {
-                        pos: [-3.0, 2.0, 0.0],
-                        scale: 1.0,
-                        rot: r2a(glam::Quat::from_rotation_y(2.0)),
-                        material: 0,
-                    },
-                    Instance {
-                        pos: [-3.0, 4.0, 0.0],
-                        scale: 0.5,
-                        rot: [0.0; 3],
-                        material: 0,
-                    },
-                    Instance {
-                        pos: [0.0, 0.0, 5.0],
-                        scale: 1.0,
-                        rot: [0.0; 3],
-                        material: 1,
-                    },
-                ]);
-                alloc.unmap_memory(&mut compute_data.1);
-            }
 
             {
                 let p = alloc.map_memory(&mut compute_parameters.1).unwrap();
@@ -370,175 +307,6 @@ unsafe fn make_command(
                     .buffer(camera.buffer(index))
                     .offset(64)
                     .range(64)
-                    .build()];
-                let info_stub_texture =
-                    [vk::DescriptorImageInfo::builder()
-                        .sampler({
-                            let info = vk::SamplerCreateInfo::builder()
-                                .mag_filter(vk::Filter::NEAREST)
-                                .min_filter(vk::Filter::NEAREST)
-                                .mag_filter(vk::Filter::LINEAR)
-                                .min_filter(vk::Filter::LINEAR)
-                                .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
-                                .address_mode_u(vk::SamplerAddressMode::REPEAT)
-                                .address_mode_v(vk::SamplerAddressMode::REPEAT)
-                                .address_mode_w(vk::SamplerAddressMode::REPEAT)
-                                .mip_lod_bias(0.0)
-                                .anisotropy_enable(false)
-                                .compare_enable(false)
-                                .compare_op(vk::CompareOp::NEVER)
-                                //.border_color(vk::BorderColor::INT_OPAQUE_BLACK)
-                                .unnormalized_coordinates(false);
-                            dev.create_sampler(&info, None).unwrap()
-                        })
-                        .image_view({
-                            let mut image = alloc.create_image(
-                            &vk::ImageCreateInfo::builder()
-                                .image_type(vk::ImageType::TYPE_2D)
-                                .format(vk::Format::R8G8B8A8_UNORM)
-                                .mip_levels(1)
-                                .array_layers(1)
-                                .samples(vk::SampleCountFlags::TYPE_1)
-                                //.tiling(vk::ImageTiling::OPTIMAL)
-                                .tiling(vk::ImageTiling::LINEAR)
-                                .usage(vk::ImageUsageFlags::SAMPLED)
-                                .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                                .queue_family_indices(&[])
-                                .extent(vk::Extent3D {
-                                    width: 16,
-                                    height: 16,
-                                    depth: 1,
-                                })
-                                .initial_layout(vk::ImageLayout::PREINITIALIZED),
-                            &vk_mem::AllocationCreateInfo {
-                                flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-                                ..Default::default()
-                            },
-                        ).unwrap();
-
-                                let bitmap = [
-                                    0b0000_0000_0000_0000,
-                                    0b0000_0000_0000_0000,
-                                    0b0000_1100_0011_0000,
-                                    0b0001_1110_0111_1000,
-                                    0b0001_1110_0111_1000,
-                                    0b0000_1100_0011_0000,
-                                    0b0000_0000_0000_0000,
-                                    0b0000_0000_0000_0000,
-                                    0b0010_0000_0000_0100,
-                                    0b0011_0000_0000_1100,
-                                    0b0001_1000_0001_1000,
-                                    0b0000_1111_1111_0000,
-                                    0b0000_0111_1110_0000,
-                                    0b0000_0000_0000_0000,
-                                    0b0000_0000_0000_0000,
-                                    0b0000_0000_0000_0000,
-                                ];
-
-                                let mut p = alloc.map_memory(&mut image.1).unwrap().cast::<u32>();
-                                for x in 0..16 { for y in 0..16 {
-                                *p = u32::MAX * (!(x / 4 ^ y / 4) & 1);
-                                *p = u32::MAX * (!(bitmap[15-y as usize] >> x) & 1);
-                                p = p.add(1);
-                    }}
-                            alloc.unmap_memory(&mut image.1);
-                            alloc.flush_allocation(&image.1, 0, 16*16*4).unwrap();
-
-            {
-    let info = vk::CommandBufferAllocateInfo::builder()
-        .command_pool(cmdpool)
-        .command_buffer_count(image_count);
-    let cmdbuf = dev.allocate_command_buffers(&info).unwrap()[0];
-    let info = vk::CommandBufferBeginInfo::builder();
-    dev.begin_command_buffer(cmdbuf, &info).unwrap();
-                let image_barriers = [vk::ImageMemoryBarrier::builder()
-                    .image(image.0)
-                    .src_access_mask(vk::AccessFlags::HOST_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                    .old_layout(vk::ImageLayout::PREINITIALIZED)
-                    .new_layout(vk::ImageLayout::GENERAL)
-                    .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 })
-                    .build()];
-                dev.cmd_pipeline_barrier(
-                    cmdbuf,
-                    vk::PipelineStageFlags::HOST,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &image_barriers,
-                );
-                dev.end_command_buffer(cmdbuf).unwrap();
-                let cmdbufs = [cmdbuf];
-                let submits = [vk::SubmitInfo::builder()
-                .command_buffers(&cmdbufs).build()];
-                dev.queue_submit(Q__queue, &submits, vk::Fence::null()).unwrap();
-                dev.device_wait_idle().unwrap();
-            }
-
-                            let info = vk::ImageViewCreateInfo::builder()
-                                .image(image.0)
-                                .view_type(vk::ImageViewType::TYPE_2D)
-                                .format(vk::Format::R8G8B8A8_UNORM)
-                                .subresource_range(vk::ImageSubresourceRange {
-                                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                                    base_mip_level: 0,
-                                    level_count: 1,
-                                    base_array_layer: 0,
-                                    layer_count: 1,
-                                });
-                            dev.create_image_view(&info, None).unwrap()
-                        })
-                        .image_layout(vk::ImageLayout::GENERAL)
-                        .build()];
-                let info_materials = [vk::DescriptorBufferInfo::builder()
-                    .buffer({
-                        let b_info = vk::BufferCreateInfo::builder()
-                            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
-                            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                            .size(mem::size_of::<[PbrMaterialView; 2]>() as _);
-                        let c_info = vk_mem::AllocationCreateInfo {
-                            flags: vk_mem::AllocationCreateFlags::STRATEGY_MIN_MEMORY
-                                | vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE,
-                            usage: vk_mem::MemoryUsage::Auto,
-                            required_flags: vk::MemoryPropertyFlags::HOST_VISIBLE
-                                | vk::MemoryPropertyFlags::HOST_COHERENT,
-                            ..Default::default()
-                        };
-                        let mut buf = alloc.create_buffer(&b_info, &c_info).unwrap();
-                        alloc
-                            .map_memory(&mut buf.1)
-                            .unwrap()
-                            .cast::<[PbrMaterialView; 2]>()
-                            .write([PbrMaterialView {
-                                uv_offset: [0.0; 2],
-                                uv_scale: [0.0; 2],
-                                albedo: [1.0; 3],
-                                albedo_texture_index: 0,
-                                roughness: 0.5,
-                                roughness_texture_id: 0,
-                                metallic: 0.5,
-                                metallic_texture_id: 0,
-                                ambient_occlusion: 1.0,
-                                ambient_occlusion_texture_id: 0,
-                                _padding: [0; 2],
-                            }, PbrMaterialView {
-                                uv_offset: [0.0; 2],
-                                uv_scale: [1.0; 2],
-                                albedo: [1.0, 1.0, 0.0],
-                                albedo_texture_index: 0,
-                                roughness: 0.5,
-                                roughness_texture_id: 0,
-                                metallic: 0.5,
-                                metallic_texture_id: 0,
-                                ambient_occlusion: 1.0,
-                                ambient_occlusion_texture_id: 0,
-                                _padding: [0; 2],
-                            }]);
-                        buf.0
-                    })
-                    .offset(0)
-                    .range(vk::WHOLE_SIZE)
                     .build()];
                 let info_directional_lights = [vk::DescriptorBufferInfo::builder()
                     .buffer({
@@ -607,50 +375,10 @@ unsafe fn make_command(
                         .buffer_info(&info_camera_inv)
                         .build(),
                     // GRAPHICS - FRAGMENT
-                    // albedo texture
-                    vk::WriteDescriptorSet::builder()
-                        .dst_set(graphics_descriptor_set)
-                        .dst_binding(1)
-                        .dst_array_element(0)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&info_stub_texture)
-                        .build(),
-                    // roughness texture
-                    vk::WriteDescriptorSet::builder()
-                        .dst_set(graphics_descriptor_set)
-                        .dst_binding(2)
-                        .dst_array_element(0)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&info_stub_texture)
-                        .build(),
-                    // metallic texture
-                    vk::WriteDescriptorSet::builder()
-                        .dst_set(graphics_descriptor_set)
-                        .dst_binding(3)
-                        .dst_array_element(0)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&info_stub_texture)
-                        .build(),
-                    // ambient occlusion texture
-                    vk::WriteDescriptorSet::builder()
-                        .dst_set(graphics_descriptor_set)
-                        .dst_binding(4)
-                        .dst_array_element(0)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&info_stub_texture)
-                        .build(),
-                    // material
-                    vk::WriteDescriptorSet::builder()
-                        .dst_set(graphics_descriptor_set)
-                        .dst_binding(5)
-                        .dst_array_element(0)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(&info_materials)
-                        .build(),
                     // directional lights
                     vk::WriteDescriptorSet::builder()
                         .dst_set(graphics_descriptor_set)
-                        .dst_binding(6)
+                        .dst_binding(1)
                         .dst_array_element(0)
                         .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                         .buffer_info(&info_directional_lights)
@@ -663,6 +391,7 @@ unsafe fn make_command(
                 command,
                 compute: DrawCommandCompute {
                     data: compute_data,
+                    data_ptr: compute_data_ptr,
                     parameters: compute_parameters,
                     descriptor_set: compute_descriptor_set,
                 },
@@ -682,8 +411,11 @@ impl DrawClosure {
         &mut self,
         dev: &ash::Device,
         function: &super::DrawFunction,
+        meshes: &MeshCollection,
+        material_set: vk::DescriptorSet,
         viewport: vk::Extent2D,
         framebuffers: &[vk::Framebuffer],
+        render_pass: vk::RenderPass,
     ) {
         assert_eq!(self.command.len(), framebuffers.len());
         for (cmd, &fb) in self.command.iter().zip(framebuffers) {
@@ -740,7 +472,7 @@ impl DrawClosure {
                 },
             ];
             let info = vk::RenderPassBeginInfo::builder()
-                .render_pass(function.render_pass)
+                .render_pass(render_pass)
                 .framebuffer(fb)
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
@@ -758,24 +490,24 @@ impl DrawClosure {
                 vk::PipelineBindPoint::GRAPHICS,
                 function.graphics_pipeline.layout,
                 0,
-                &[cmd.graphics.descriptor_set],
+                &[cmd.graphics.descriptor_set, material_set],
                 &[],
             );
             dev.cmd_bind_vertex_buffers(
                 cmd.command,
                 0,
                 &[
-                    self.meshes.vertex_data.0,
-                    self.meshes.vertex_data.0,
-                    self.meshes.vertex_data.0,
+                    meshes.vertex_data.0,
+                    meshes.vertex_data.0,
+                    meshes.vertex_data.0,
                     // FIXME lol, lmao
                     cmd.compute.data.0,
                     cmd.graphics.data.0,
                 ],
                 &[
-                    self.meshes.positions_offset,
-                    self.meshes.normals_offset,
-                    self.meshes.uvs_offset,
+                    meshes.positions_offset,
+                    meshes.normals_offset,
+                    meshes.uvs_offset,
                     0,
                     0,
                 ],
@@ -792,12 +524,7 @@ impl DrawClosure {
                 0,
                 crate::f32_to_bytes(&inv_viewport.to_array()),
             );
-            dev.cmd_bind_index_buffer(
-                cmd.command,
-                self.meshes.index_data.0,
-                0,
-                vk::IndexType::UINT32,
-            );
+            dev.cmd_bind_index_buffer(cmd.command, meshes.index_data.0, 0, vk::IndexType::UINT32);
             let viewports = [vk::Viewport {
                 x: 0.0,
                 y: 0.0,
@@ -818,7 +545,7 @@ impl DrawClosure {
                 4,
                 cmd.graphics.parameters.0,
                 0,
-                self.meshes.len() as u32,
+                meshes.len() as u32,
                 mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
             );
             dev.cmd_end_render_pass(cmd.command);
@@ -828,7 +555,24 @@ impl DrawClosure {
     }
 }
 
+#[repr(C)]
+pub struct Instance {
+    pub pos: [f32; 3],
+    pub scale: f32,
+    pub rot: [f32; 3],
+    pub material: u32,
+}
+
 impl DrawClosure {
+    pub fn instance_data(&mut self, index: usize) -> &mut [Instance] {
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                self.command[index].compute.data_ptr.cast(),
+                self.max_instances.try_into().unwrap(),
+            )
+        }
+    }
+
     pub unsafe fn submit(
         &self,
         dev: &ash::Device,

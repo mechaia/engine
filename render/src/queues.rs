@@ -14,7 +14,10 @@ fn create_device(
         ash::extensions::khr::Swapchain::name().as_ptr(),
         vk::KhrShaderClockFn::name().as_ptr(),
     ];
-    let mut vk12 = vk::PhysicalDeviceVulkan12Features::builder().draw_indirect_count(true);
+    let mut vk12 = vk::PhysicalDeviceVulkan12Features::builder()
+        .draw_indirect_count(true)
+        .runtime_descriptor_array(true)
+        .shader_sampled_image_array_non_uniform_indexing(true);
     let device_create_info = vk::DeviceCreateInfo::builder()
         .queue_create_infos(queue_infos)
         .enabled_extension_names(&device_extension_names)
