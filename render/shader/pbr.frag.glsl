@@ -57,7 +57,6 @@ vec3 view_normal;
 vec3 albedo;
 float roughness;
 float metallic;
-float ambient_occlusion;
 
 vec3 reflectivity;
 
@@ -74,7 +73,7 @@ float DistributionGGX(vec3 N, vec3 H) {
 	
     float num   = a2;
     float denom = (NdotH2 * (a2 - 1.0) + 1.0);
-    denom = PI * denom * denom;
+    denom = PI * (denom * denom);
 	
     return num / denom;
 }
@@ -129,14 +128,7 @@ void main() {
     albedo = m.albedo * texture(textures_rgba[nonuniformEXT(m.albedo_texture_index)], in_uv).rgb;
     roughness = m.roughness * texture(textures_rgba[nonuniformEXT(m.roughness_texture_index)], in_uv).r;
     metallic = m.metallic * texture(textures_rgba[nonuniformEXT(m.metallic_texture_index)], in_uv).r;
-    ambient_occlusion = m.ambient_occlusion * texture(textures_rgba[nonuniformEXT(m.ambient_occlusion_texture_index)], in_uv).r;
-
-    /*
-    albedo = m.albedo * texture(textures_rgba[m.albedo_texture_index], in_uv).rgb;
-    roughness = m.roughness * texture(textures_rgba[m.roughness_texture_index], in_uv).r;
-    metallic = m.metallic * texture(textures_rgba[m.metallic_texture_index], in_uv).r;
-    ambient_occlusion = m.ambient_occlusion * texture(textures_rgba[m.ambient_occlusion_texture_index], in_uv).r;
-    */
+    float ambient_occlusion = m.ambient_occlusion * texture(textures_rgba[nonuniformEXT(m.ambient_occlusion_texture_index)], in_uv).r;
 
     reflectivity = mix(vec3(0.04), albedo, metallic);
 

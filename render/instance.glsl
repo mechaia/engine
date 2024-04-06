@@ -1,5 +1,9 @@
 #version 450
 
+//#define LOCAL_SIZE_X 1
+
+layout(local_size_x = 1 << 0, local_size_y = 1, local_size_z = 1) in;
+
 layout (binding = 0) uniform Camera {
 	mat4 projection;
 };

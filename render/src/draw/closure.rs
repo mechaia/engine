@@ -1,4 +1,4 @@
-use crate::{material::PbrMaterialView, mesh::MeshCollection, VmaBuffer};
+use crate::{material::PbrMaterialView, mesh::MeshCollection, InstanceData, VmaBuffer};
 use ash::vk::{self, PipelineLayoutCreateFlags};
 use core::{ffi::CStr, mem};
 use glam::{Vec2, Vec3};
@@ -38,6 +38,8 @@ struct DrawCommandCompute {
     ///
     /// Set by host, so host-visible.
     parameters: VmaBuffer,
+    /// Pointer to mapped parameters.
+    parameters_ptr: *mut u8,
     /// - camera mat4 (uniform)
     /// - compute_data (storage)
     /// - graphics_data (storage)
@@ -58,6 +60,8 @@ struct DrawCommandGraphics {
     ///
     /// (currently) Set by host, so host-visible.
     parameters: VmaBuffer,
+    /// Pointer to mapped parameters.
+    parameters_ptr: *mut u8,
     /// - camera near/far (uniform)
     descriptor_set: vk::DescriptorSet,
 }
@@ -218,6 +222,8 @@ unsafe fn make_command(
                 true,
             );
             let compute_data_ptr = alloc.map_memory(&mut compute_data.1).unwrap();
+            let compute_parameters_ptr = alloc.map_memory(&mut compute_parameters.1).unwrap();
+
             let graphics_data = alloc_storage(
                 alloc,
                 graphics_data_size(max_instance_count),
@@ -232,6 +238,8 @@ unsafe fn make_command(
                 false,
                 true,
             );
+            let graphics_parameters_ptr = alloc.map_memory(&mut graphics_parameters.1).unwrap();
+
             let [compute_descriptor_set, graphics_descriptor_set] = {
                 let layouts = [
                     function.compute_pipeline.descriptor_set_layout,
@@ -245,47 +253,6 @@ unsafe fn make_command(
                     .try_into()
                     .unwrap()
             };
-
-            {
-                let p = alloc.map_memory(&mut compute_parameters.1).unwrap();
-                p.cast::<vk::DispatchIndirectCommand>()
-                    .write_unaligned(vk::DispatchIndirectCommand { x: 7, y: 1, z: 1 });
-                alloc.unmap_memory(&mut compute_parameters.1);
-            }
-
-            {
-                let monkey = meshes.mesh(0);
-                let donut = meshes.mesh(1);
-                let cube = meshes.mesh(2);
-                let p = alloc.map_memory(&mut graphics_parameters.1).unwrap();
-                p.cast::<u32>().write_unaligned(3);
-                p.add(4)
-                    .cast::<[vk::DrawIndexedIndirectCommand; 3]>()
-                    .write([
-                        vk::DrawIndexedIndirectCommand {
-                            vertex_offset: monkey.vertex_offset.try_into().unwrap(),
-                            first_index: monkey.index_offset,
-                            index_count: monkey.index_count,
-                            instance_count: 3,
-                            first_instance: 0,
-                        },
-                        vk::DrawIndexedIndirectCommand {
-                            vertex_offset: donut.vertex_offset.try_into().unwrap(),
-                            first_index: donut.index_offset,
-                            index_count: donut.index_count,
-                            instance_count: 3,
-                            first_instance: 3,
-                        },
-                        vk::DrawIndexedIndirectCommand {
-                            vertex_offset: cube.vertex_offset.try_into().unwrap(),
-                            first_index: cube.index_offset,
-                            index_count: cube.index_count,
-                            instance_count: 1,
-                            first_instance: 6,
-                        },
-                    ]);
-                alloc.unmap_memory(&mut graphics_parameters.1);
-            }
 
             {
                 let info_camera = [vk::DescriptorBufferInfo::builder()
@@ -393,11 +360,13 @@ unsafe fn make_command(
                     data: compute_data,
                     data_ptr: compute_data_ptr,
                     parameters: compute_parameters,
+                    parameters_ptr: compute_parameters_ptr,
                     descriptor_set: compute_descriptor_set,
                 },
                 graphics: DrawCommandGraphics {
                     data: graphics_data,
                     parameters: graphics_parameters,
+                    parameters_ptr: graphics_parameters_ptr,
                     descriptor_set: graphics_descriptor_set,
                 },
             }
@@ -480,6 +449,7 @@ impl DrawClosure {
                 })
                 .clear_values(&clearvalues);
             dev.cmd_begin_render_pass(cmd.command, &info, vk::SubpassContents::INLINE);
+
             dev.cmd_bind_pipeline(
                 cmd.command,
                 vk::PipelineBindPoint::GRAPHICS,
@@ -564,12 +534,59 @@ pub struct Instance {
 }
 
 impl DrawClosure {
-    pub fn instance_data(&mut self, index: usize) -> &mut [Instance] {
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                self.command[index].compute.data_ptr.cast(),
-                self.max_instances.try_into().unwrap(),
-            )
+    pub unsafe fn set_instance_data(
+        &mut self,
+        index: usize,
+        meshes: &MeshCollection,
+        instance_counts: &[u32],
+        instance_data: &mut dyn Iterator<Item = InstanceData>,
+    ) {
+        let cmd = &mut self.command[index];
+        assert_eq!(instance_counts.len(), meshes.len());
+        assert!(instance_counts.iter().sum::<u32>() <= self.max_instances);
+
+        let mut p = cmd.compute.data_ptr.cast::<Instance>();
+        for mut d in instance_data.take(self.max_instances as usize) {
+            if d.rotation.w < 0.0 {
+                d.rotation = -d.rotation;
+            }
+            p.write(Instance {
+                pos: d.translation.to_array(),
+                scale: 1.0,
+                rot: d.rotation.xyz().to_array(),
+                material: d.material.0.as_u32(),
+            });
+            p = p.add(1);
+        }
+
+        cmd.compute
+            .parameters_ptr
+            .cast::<vk::DispatchIndirectCommand>()
+            .write(vk::DispatchIndirectCommand {
+                x: instance_counts.iter().sum::<u32>(),
+                y: 1,
+                z: 1,
+            });
+
+        let p = cmd.graphics.parameters_ptr.cast::<u32>();
+        p.write(instance_counts.iter().filter(|&&n| n > 0).count() as u32);
+
+        let mut p = p.add(1).cast::<vk::DrawIndexedIndirectCommand>();
+        let mut first_instance = 0;
+        for (i, &instance_count) in instance_counts.iter().enumerate() {
+            if instance_count == 0 {
+                continue;
+            }
+            let mesh = meshes.mesh(i);
+            p.write(vk::DrawIndexedIndirectCommand {
+                first_instance,
+                instance_count,
+                index_count: mesh.index_count,
+                first_index: mesh.index_offset,
+                vertex_offset: mesh.vertex_offset as i32,
+            });
+            first_instance += instance_count;
+            p = p.add(1);
         }
     }
 

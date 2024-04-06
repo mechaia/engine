@@ -1,0 +1,292 @@
+use glam::UVec2;
+use std::{collections::HashMap, hash::DefaultHasher, time::Instant};
+use winit::{
+    event::{DeviceEvent, ElementState, KeyEvent, StartCause, WindowEvent},
+    event_loop::EventLoop,
+    keyboard::{Key, KeyLocation, NamedKey},
+    platform::pump_events::EventLoopExtPumpEvents,
+    raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, WindowHandle},
+    window::WindowBuilder,
+};
+
+pub struct Window {
+    event_loop: EventLoop<()>,
+    window: winit::window::Window,
+    active_inputs: HashMap<InputKey, f32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Event {
+    Resized(UVec2),
+    Input(Input),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Input {
+    key: InputKey,
+    value: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum InputKey {
+    A,
+    B,
+    C,
+    D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
+    R,
+    S,
+    T,
+    U,
+    V,
+    W,
+    X,
+    Y,
+    Z,
+    Enter,
+    Space,
+    LShift,
+    RShift,
+    LCtrl,
+    RCtrl,
+    LSuper,
+    RSuper,
+    MouseRelativeX,
+    MouseRelativeY,
+    MouseButtonL,
+    MouseButtonM,
+    MouseButtonR,
+}
+
+impl Window {
+    pub fn new() -> Self {
+        let event_loop = EventLoop::new().unwrap();
+        let window = WindowBuilder::new().build(&event_loop).unwrap();
+        Self {
+            event_loop,
+            window,
+            active_inputs: Default::default(),
+        }
+    }
+
+    pub fn wait(&mut self, until: Instant) -> Vec<Event> {
+        let Some(dur) = until.checked_duration_since(Instant::now()) else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        type E<'a, T> = winit::event::Event<T>;
+        self.event_loop
+            .pump_events(Some(dur), |event, _| match event {
+                E::WindowEvent {
+                    window_id: _,
+                    event,
+                } => match event {
+                    WindowEvent::Resized(s) => {
+                        events.push(Event::Resized(UVec2::new(s.width, s.height)))
+                    }
+                    WindowEvent::Ime(_) => {}
+                    WindowEvent::Moved(_) => {}
+                    WindowEvent::Touch(_) => todo!(),
+                    WindowEvent::Destroyed => todo!(),
+                    WindowEvent::Focused(_) => {}
+                    WindowEvent::Occluded(_) => {}
+                    WindowEvent::CursorLeft { device_id } => {}
+                    WindowEvent::MouseWheel {
+                        device_id,
+                        delta,
+                        phase,
+                    } => todo!(),
+                    WindowEvent::MouseInput {
+                        device_id,
+                        state,
+                        button,
+                    } => {}
+                    WindowEvent::AxisMotion {
+                        device_id,
+                        axis,
+                        value,
+                    } => {}
+                    WindowEvent::DroppedFile(_) => todo!(),
+                    WindowEvent::HoveredFile(_) => todo!(),
+                    WindowEvent::CursorMoved {
+                        device_id,
+                        position,
+                    } => {}
+                    WindowEvent::CloseRequested => todo!(),
+                    WindowEvent::SmartMagnify { device_id } => todo!(),
+                    WindowEvent::ThemeChanged(_) => todo!(),
+                    WindowEvent::KeyboardInput {
+                        device_id,
+                        event,
+                        is_synthetic: _,
+                    } => {
+                        use InputKey::*;
+                        let key = match event.logical_key {
+                            Key::Named(n) => match (n, event.location) {
+                                (NamedKey::Space, _) => Space,
+                                (NamedKey::Control, KeyLocation::Left) => LCtrl,
+                                (NamedKey::Control, KeyLocation::Right) => RCtrl,
+                                (NamedKey::Shift, KeyLocation::Left) => LShift,
+                                (NamedKey::Shift, KeyLocation::Right) => RShift,
+                                (NamedKey::Super, KeyLocation::Left) => LSuper,
+                                (NamedKey::Super, KeyLocation::Right) => RSuper,
+                                (NamedKey::Enter, _) => Enter,
+                                n => todo!("{:?}", n),
+                            },
+                            Key::Dead(_) => todo!(),
+                            Key::Character(chr) => match chr.as_str() {
+                                "a" | "A" => A,
+                                "b" | "B" => B,
+                                "c" | "C" => C,
+                                "d" | "D" => D,
+                                "e" | "E" => E,
+                                "f" | "F" => F,
+                                "g" | "G" => G,
+                                "h" | "H" => H,
+                                "i" | "I" => I,
+                                "j" | "J" => J,
+                                "k" | "K" => K,
+                                "l" | "L" => L,
+                                "m" | "M" => M,
+                                "n" | "N" => N,
+                                "o" | "O" => O,
+                                "p" | "P" => P,
+                                "q" | "Q" => Q,
+                                "s" | "S" => S,
+                                "t" | "T" => T,
+                                "u" | "U" => U,
+                                "v" | "V" => V,
+                                "w" | "W" => W,
+                                "z" | "Z" => Z,
+                                c => todo!("{:?}", c),
+                            },
+                            Key::Unidentified(_) => todo!(),
+                        };
+                        let value = match event.state {
+                            ElementState::Pressed => 1.0,
+                            ElementState::Released => 0.0,
+                        };
+                        events.push(set_input(&mut self.active_inputs, key, value));
+                    }
+                    WindowEvent::CursorEntered { device_id } => {}
+                    WindowEvent::TouchpadRotate {
+                        device_id,
+                        delta,
+                        phase,
+                    } => todo!(),
+                    WindowEvent::TouchpadMagnify {
+                        device_id,
+                        delta,
+                        phase,
+                    } => todo!(),
+                    WindowEvent::ModifiersChanged(_) => {}
+                    WindowEvent::TouchpadPressure {
+                        device_id,
+                        pressure,
+                        stage,
+                    } => todo!(),
+                    WindowEvent::HoveredFileCancelled => todo!(),
+                    WindowEvent::ScaleFactorChanged {
+                        scale_factor,
+                        inner_size_writer,
+                    } => todo!(),
+                    WindowEvent::ActivationTokenDone { serial, token } => todo!(),
+                    WindowEvent::RedrawRequested => {}
+                },
+                E::NewEvents(event) => match event {
+                    StartCause::ResumeTimeReached {
+                        start,
+                        requested_resume,
+                    } => todo!(),
+                    StartCause::Poll => todo!(),
+                    StartCause::Init => {}
+                    StartCause::WaitCancelled {
+                        start,
+                        requested_resume,
+                    } => {}
+                },
+                E::Resumed => {}
+                E::Suspended => todo!(),
+                E::DeviceEvent { device_id, event } => match event {
+                    DeviceEvent::Key(_) => {}
+                    DeviceEvent::Motion { axis, value } => {}
+                    DeviceEvent::MouseMotion { delta: (x, y) } => {
+                        for e in [(InputKey::MouseRelativeX, x), (InputKey::MouseRelativeY, y)] {
+                            let v = *self.active_inputs.get(&e.0).unwrap_or(&0.0);
+                            events.push(set_input(&mut self.active_inputs, e.0, v + e.1 as f32));
+                        }
+                    }
+                    DeviceEvent::Button { button, state } => {
+                        let key = match button {
+                            1 => InputKey::MouseButtonL,
+                            2 => InputKey::MouseButtonM,
+                            3 => InputKey::MouseButtonR,
+                            n => todo!("{:?}", n),
+                        };
+                        let value = match state {
+                            ElementState::Pressed => 1.0,
+                            ElementState::Released => 0.0,
+                        };
+                        events.push(set_input(&mut self.active_inputs, key, value));
+                    }
+                    e => todo!("{:?}", e),
+                },
+                E::UserEvent(_) => todo!(),
+                E::AboutToWait => {}
+                E::LoopExiting => todo!(),
+                E::MemoryWarning => todo!(),
+            });
+        events
+    }
+
+    /// Window size
+    pub fn size(&self) -> UVec2 {
+        let size = self.window.inner_size();
+        UVec2::new(size.width, size.height)
+    }
+
+    /// Height over width ratio.
+    pub fn aspect(&self) -> f32 {
+        let size = self.size();
+        size.x as f32 / size.y as f32
+    }
+
+    /// Get the value of an input.
+    pub fn input(&self, key: InputKey) -> f32 {
+        *self.active_inputs.get(&key).unwrap_or(&0.0)
+    }
+
+    /// Reset accumulated relative mouse movements.
+    pub fn reset_mouse_relative(&mut self) {
+        self.active_inputs.remove(&InputKey::MouseRelativeX);
+        self.active_inputs.remove(&InputKey::MouseRelativeY);
+    }
+
+    pub fn render_handles(&self) -> (WindowHandle, DisplayHandle) {
+        (
+            self.window.window_handle().unwrap(),
+            self.window.display_handle().unwrap(),
+        )
+    }
+}
+
+fn set_input(map: &mut HashMap<InputKey, f32>, key: InputKey, value: f32) -> Event {
+    if value == 0.0 {
+        map.remove(&key);
+    } else {
+        map.insert(key, value);
+    }
+    Event::Input(Input { key, value })
+}

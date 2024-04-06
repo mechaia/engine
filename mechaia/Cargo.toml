@@ -1,0 +1,10 @@
+[package]
+name = "mechaia"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+physics3d = { path = "../physics3d", package = "mechaia_physics3d" }
+render = { path = "../render", package = "mechaia_render" }
+window = { path = "../window", package = "mechaia_window" }
+glam = "0.27.0"

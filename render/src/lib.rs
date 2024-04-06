@@ -11,9 +11,8 @@ use glam::{Quat, UVec2, UVec3, Vec3};
 pub use mesh::Mesh;
 
 use ash::vk;
-use core::{ffi::CStr, mem, num::NonZeroU32, ptr::NonNull};
-use raw_window_handle::HasRawDisplayHandle;
-use std::{backtrace::Backtrace, borrow::Cow};
+use core::{ffi::CStr, mem, num::NonZeroU32};
+use std::backtrace::Backtrace;
 use vk_mem::{Alloc, AllocatorCreateInfo};
 
 const TIMEOUT: u64 = 100_000_000;
@@ -392,18 +391,62 @@ unsafe fn make_material_set(
     }
 }
 
-fn init_vulkan(window: &winit::window::Window) -> Vulkan {
+macro_rules! cvt_raw_handle {
+    ($fn:ident $arg:ident $ret:ident $($var:ident $varh:ident [$($val:ident)*])*) => {
+fn $fn(display: raw_window_handle::$arg) -> old_raw_window_handle::$ret {
+    match display.as_raw() { $(
+        raw_window_handle::$ret::$var(x) => {
+            let mut y = old_raw_window_handle::$varh::empty();
+            $(y.$val = x.$val;)*
+            old_raw_window_handle::$ret::$var(y)
+        }
+        c => todo!("{:?}", c),
+    )* }
+}
+    };
+}
+
+fn convert_display_handle(
+    display: raw_window_handle::DisplayHandle,
+) -> old_raw_window_handle::RawDisplayHandle {
+    use old_raw_window_handle as b;
+    use old_raw_window_handle::RawDisplayHandle as B;
+    use raw_window_handle::RawDisplayHandle as A;
+    match display.as_raw() {
+        A::Xlib(x) => {
+            let mut y = b::XlibDisplayHandle::empty();
+            y.display = x.display.map_or(core::ptr::null_mut(), |p| p.as_ptr());
+            y.screen = x.screen;
+            B::Xlib(y)
+        }
+        c => todo!("{:?}", c),
+    }
+}
+
+cvt_raw_handle!(
+    convert_window_handle WindowHandle RawWindowHandle
+    Xlib XlibWindowHandle [window visual_id]
+);
+
+fn init_vulkan(
+    window: raw_window_handle::WindowHandle,
+    display: raw_window_handle::DisplayHandle,
+) -> Vulkan {
+    // FIXME fucking ash-window, y u close?
+    // https://github.com/ash-rs/ash/pull/826
+    let raw_window_handle = convert_window_handle(window);
+    let raw_display_handle = convert_display_handle(display);
+
     let entry = unsafe { ash::Entry::load().unwrap() };
 
     // Basic setup
     let mut layer_names = vec![];
     let mut extension_names = vec![];
 
-    extension_names.extend_from_slice(
-        ash_window::enumerate_required_extensions(window.raw_display_handle()).unwrap(),
-    );
+    extension_names
+        .extend_from_slice(ash_window::enumerate_required_extensions(raw_display_handle).unwrap());
 
-    //layer_names.push(b"VK_LAYER_KHRONOS_validation\0".as_ptr() as *const i8);
+    layer_names.push(b"VK_LAYER_KHRONOS_validation\0".as_ptr() as *const i8);
     extension_names.push(ash::extensions::ext::DebugUtils::name().as_ptr());
 
     let app_info = vk::ApplicationInfo::builder()
@@ -447,8 +490,8 @@ fn init_vulkan(window: &winit::window::Window) -> Vulkan {
         ash_window::create_surface(
             &entry,
             &instance,
-            window.raw_display_handle(),
-            window.raw_window_handle(),
+            raw_display_handle,
+            raw_window_handle,
             None,
         )
         .unwrap()
@@ -653,8 +696,11 @@ pub struct InstanceData {
 }
 
 impl Render {
-    pub fn new(window: &winit::window::Window) -> Self {
-        let vulkan = init_vulkan(window);
+    pub fn new(
+        window: raw_window_handle::WindowHandle,
+        display: raw_window_handle::DisplayHandle,
+    ) -> Self {
+        let vulkan = init_vulkan(window, display);
         let material_set = unsafe { make_material_set(&vulkan.dev, &vulkan.allocator, 1024, 1024) };
         let draw_function = unsafe {
             draw::DrawFunction::new(
@@ -831,21 +877,8 @@ impl Render {
             self.vulkan
                 .swapchain
                 .draw(&self.vulkan.dev, &mut self.vulkan.swapchain_draw, |info| {
-                    for (w, mut r) in closure
-                        .instance_data(info.index)
-                        .iter_mut()
-                        .zip(instances_data)
-                    {
-                        if r.rotation.w < 0.0 {
-                            r.rotation = -r.rotation;
-                        }
-                        *w = draw::Instance {
-                            pos: r.translation.to_array(),
-                            scale: 1.0,
-                            rot: r.rotation.xyz().to_array(),
-                            material: r.material.0.as_u32(),
-                        };
-                    }
+                    let meshes = &self.mesh_sets[closure.mesh_handle.0];
+                    closure.set_instance_data(info.index, meshes, instances_counts, instances_data);
                     self.vulkan.camera.set(info.index, camera);
                     closure.submit(&self.vulkan.dev, &mut self.vulkan.commands, &info);
                     self.vulkan.commands.queues.graphics
