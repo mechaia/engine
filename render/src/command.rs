@@ -3,6 +3,8 @@ use core::mem;
 use glam::{U64Vec3, UVec3};
 use vk_mem::Alloc;
 
+use crate::Dev;
+
 const DRAW_PARAMETERS_SIZE: u32 = mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32;
 
 pub struct Commands {
@@ -75,14 +77,13 @@ impl Commands {
 
     pub unsafe fn transfer_to(
         &mut self,
-        dev: &ash::Device,
-        alloc: &vk_mem::Allocator,
+        dev: &Dev,
         dst: vk::Buffer,
         dst_offset: u64,
         src: *const u8,
         amount: usize,
     ) {
-        with_buffer(dev, alloc, amount, &mut |dev, buf, ptr| {
+        with_buffer(dev, amount, &mut |dev, buf, ptr| {
             ptr.copy_from_nonoverlapping(src, amount);
             self.transfer_between(dev, dst, dst_offset, buf, 0, amount);
         });
@@ -144,8 +145,7 @@ impl Commands {
 
     pub unsafe fn transfer_to_image_with(
         &mut self,
-        dev: &ash::Device,
-        alloc: &vk_mem::Allocator,
+        dev: &Dev,
         dst: vk::Image,
         dst_offset: UVec3,
         src_f: &mut dyn FnMut(&mut [u8]),
@@ -158,7 +158,7 @@ impl Commands {
         };
         let size =
             usize::try_from(U64Vec3::from(dimensions).element_product() * elem_size).unwrap();
-        with_buffer(dev, alloc, size, &mut |dev, buf, ptr| {
+        with_buffer(dev, size, &mut |dev, buf, ptr| {
             src_f(core::slice::from_raw_parts_mut(ptr, size));
             self.oneshot(dev, &mut |dev, cmdbuf| {
                 dev.cmd_pipeline_barrier(
@@ -217,7 +217,6 @@ impl Commands {
                         .dst_access_mask(vk::AccessFlags::SHADER_READ)
                         .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                         .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .new_layout(vk::ImageLayout::GENERAL)
                         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                         .subresource_range(vk::ImageSubresourceRange {
@@ -253,12 +252,12 @@ fn uvec3_to_offset3d(v: UVec3) -> vk::Offset3D {
 }
 
 unsafe fn with_buffer(
-    dev: &ash::Device,
-    alloc: &vk_mem::Allocator,
+    dev: &Dev,
     size: usize,
     f: &mut dyn FnMut(&ash::Device, vk::Buffer, *mut u8),
 ) {
-    let mut buf = alloc
+    let mut buf = dev
+        .alloc
         .create_buffer(
             &vk::BufferCreateInfo::builder()
                 .size(size as u64)
@@ -274,9 +273,9 @@ unsafe fn with_buffer(
             },
         )
         .unwrap();
-    let ptr = alloc.map_memory(&mut buf.1).unwrap();
+    let ptr = dev.alloc.map_memory(&mut buf.1).unwrap();
     f(dev, buf.0, ptr);
-    alloc.unmap_memory(&mut buf.1);
+    dev.alloc.unmap_memory(&mut buf.1);
     //alloc.flush_allocation(&buf.1, 0, size).unwrap();
-    alloc.destroy_buffer(buf.0, &mut buf.1);
+    dev.alloc.destroy_buffer(buf.0, &mut buf.1);
 }

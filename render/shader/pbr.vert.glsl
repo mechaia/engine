@@ -8,13 +8,9 @@ layout (location = 0) in vec3 position;
 layout (location = 1) in vec3 normal;
 layout (location = 2) in vec2 uv;
 
-// FIXME don't pad
-layout (location = 3) in vec3 _pos;
-layout (location = 4) in float _scale;
-layout (location = 5) in vec3 _rot;
-layout (location = 6) in uint material_index;
+layout (location = 3) in uint material_index;
 
-layout (location = 7) in mat4 projection;
+layout (location = 4) in mat4 projection;
 
 layout (location = 0) out vec3 out_position;
 layout (location = 1) out vec3 out_normal;

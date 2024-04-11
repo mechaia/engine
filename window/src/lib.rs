@@ -1,7 +1,7 @@
 use glam::UVec2;
 use std::{collections::HashMap, hash::DefaultHasher, time::Instant};
 use winit::{
-    event::{DeviceEvent, ElementState, KeyEvent, StartCause, WindowEvent},
+    event::{DeviceEvent, ElementState, KeyEvent, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::EventLoop,
     keyboard::{Key, KeyLocation, NamedKey},
     platform::pump_events::EventLoopExtPumpEvents,
@@ -68,6 +68,10 @@ pub enum InputKey {
     MouseButtonL,
     MouseButtonM,
     MouseButtonR,
+    MouseWheelY,
+    PrintScreen,
+    PageUp,
+    PageDown,
 }
 
 impl Window {
@@ -107,7 +111,19 @@ impl Window {
                         device_id,
                         delta,
                         phase,
-                    } => todo!(),
+                    } => {
+                        // FIXME accumulate like rel mouse
+                        match delta {
+                            MouseScrollDelta::LineDelta(_, y) => {
+                                events.push(set_input(
+                                    &mut self.active_inputs,
+                                    InputKey::MouseWheelY,
+                                    y,
+                                ));
+                            }
+                            MouseScrollDelta::PixelDelta(_) => todo!(),
+                        }
+                    }
                     WindowEvent::MouseInput {
                         device_id,
                         state,
@@ -143,6 +159,9 @@ impl Window {
                                 (NamedKey::Super, KeyLocation::Left) => LSuper,
                                 (NamedKey::Super, KeyLocation::Right) => RSuper,
                                 (NamedKey::Enter, _) => Enter,
+                                (NamedKey::PrintScreen, _) => PrintScreen,
+                                (NamedKey::PageUp, _) => PageUp,
+                                (NamedKey::PageDown, _) => PageDown,
                                 n => todo!("{:?}", n),
                             },
                             Key::Dead(_) => todo!(),
@@ -164,6 +183,7 @@ impl Window {
                                 "o" | "O" => O,
                                 "p" | "P" => P,
                                 "q" | "Q" => Q,
+                                "r" | "R" => R,
                                 "s" | "S" => S,
                                 "t" | "T" => T,
                                 "u" | "U" => U,
@@ -241,6 +261,7 @@ impl Window {
                         };
                         events.push(set_input(&mut self.active_inputs, key, value));
                     }
+                    DeviceEvent::MouseWheel { delta } => {}
                     e => todo!("{:?}", e),
                 },
                 E::UserEvent(_) => todo!(),
@@ -257,7 +278,7 @@ impl Window {
         UVec2::new(size.width, size.height)
     }
 
-    /// Height over width ratio.
+    /// Width over height ratio.
     pub fn aspect(&self) -> f32 {
         let size = self.size();
         size.x as f32 / size.y as f32
@@ -268,10 +289,11 @@ impl Window {
         *self.active_inputs.get(&key).unwrap_or(&0.0)
     }
 
-    /// Reset accumulated relative mouse movements.
+    /// Reset accumulated relative mouse movements, including wheel.
     pub fn reset_mouse_relative(&mut self) {
         self.active_inputs.remove(&InputKey::MouseRelativeX);
         self.active_inputs.remove(&InputKey::MouseRelativeY);
+        self.active_inputs.remove(&InputKey::MouseWheelY);
     }
 
     pub fn render_handles(&self) -> (WindowHandle, DisplayHandle) {

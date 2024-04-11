@@ -1,8 +1,11 @@
 // Ripped straight from https://learnopengl.com/PBR/Lighting with no shame.
 #version 460
 #extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_EXT_scalar_block_layout : enable
 
 #define MAX_DIRECTIONAL_LIGHTS (1)
+#define MAX_MATERIALS (4096)
+
 const float PI = 3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679;
 
 layout (push_constant, std430) uniform Viewport {
@@ -16,13 +19,14 @@ struct DirectionalLight {
 };
 
 struct Material {
-    vec3 albedo;
-    uint albedo_texture_index;
+    vec4 albedo;
     float roughness;
-    uint roughness_texture_index;
     float metallic;
-    uint metallic_texture_index;
     float ambient_occlusion;
+    float _padding;
+    uint albedo_texture_index;
+    uint roughness_texture_index;
+    uint metallic_texture_index;
     uint ambient_occlusion_texture_index;
 };
 
@@ -39,9 +43,14 @@ layout (binding = 3) readonly buffer Lights {
 
 layout (set = 1, binding = 0) uniform sampler2D textures_rgba[];
 
-layout (std430, set = 1, binding = 1) readonly buffer Materials {
+layout (std430, set = 2, binding = 0) uniform Materials {
+    Material materials[MAX_MATERIALS];
+};
+/*
+layout (std430, set = 2, binding = 0) readonly buffer Materials {
     Material materials[];
 };
+*/
 
 layout (location = 0) in vec3 position;
 layout (location = 1) in vec3 normal_unnormalized;
@@ -125,7 +134,8 @@ void main() {
 
     Material m = materials[nonuniformEXT(in_material_index)];
 
-    albedo = m.albedo * texture(textures_rgba[nonuniformEXT(m.albedo_texture_index)], in_uv).rgb;
+    vec4 albedo_a = m.albedo * texture(textures_rgba[nonuniformEXT(m.albedo_texture_index)], in_uv);
+    albedo = albedo_a.rgb;
     roughness = m.roughness * texture(textures_rgba[nonuniformEXT(m.roughness_texture_index)], in_uv).r;
     metallic = m.metallic * texture(textures_rgba[nonuniformEXT(m.metallic_texture_index)], in_uv).r;
     float ambient_occlusion = m.ambient_occlusion * texture(textures_rgba[nonuniformEXT(m.ambient_occlusion_texture_index)], in_uv).r;
@@ -145,5 +155,5 @@ void main() {
     color = color / (color + vec3(1.0));
     color = pow(color, vec3(1.0/2.2));
 
-    out_color = vec4(color, 1);
+    out_color = vec4(color, albedo_a.w);
 }

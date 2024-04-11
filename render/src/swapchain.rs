@@ -1,5 +1,4 @@
 use ash::vk;
-use vk_mem::Alloc;
 
 pub struct DrawInfo {
     pub index: usize,
@@ -52,35 +51,34 @@ impl Draw {
 pub struct SwapChain {
     loader: ash::extensions::khr::Swapchain,
     khr: vk::SwapchainKHR,
-    image_views: Vec<vk::ImageView>,
-    pub framebuffers: Vec<vk::Framebuffer>,
-    images: Vec<super::VmaImage>,
+    surface_capabilities: vk::SurfaceCapabilitiesKHR,
+    surface_format: vk::SurfaceFormatKHR,
 }
 
 impl SwapChain {
     pub fn new(
         physical_device: vk::PhysicalDevice,
         dev: &ash::Device,
-        alloc: &vk_mem::Allocator,
         surface_loader: &ash::extensions::khr::Surface,
         surface: vk::SurfaceKHR,
         surface_format: vk::SurfaceFormatKHR,
         graphics_queue_index: u32,
         instance: &ash::Instance,
-        render_pass: vk::RenderPass,
-        image_count: usize,
-    ) -> (Self, vk::Extent2D) {
+        image_count: u32,
+    ) -> Self {
         // Swapchain
         let surface_capabilities = unsafe {
             surface_loader
                 .get_physical_device_surface_capabilities(physical_device, surface)
                 .unwrap()
         };
+        let extent = surface_capabilities.current_extent;
+        let format = surface_format.format;
 
         let queuefamilies = [graphics_queue_index];
         let create_info = vk::SwapchainCreateInfoKHR::builder()
             .surface(surface)
-            .min_image_count(image_count as u32)
+            .min_image_count(image_count)
             .image_format(surface_format.format)
             .image_color_space(surface_format.color_space)
             .image_extent(surface_capabilities.current_extent)
@@ -91,112 +89,27 @@ impl SwapChain {
             .pre_transform(surface_capabilities.current_transform)
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
             .present_mode(vk::PresentModeKHR::FIFO);
-        //.present_mode(vk::PresentModeKHR::MAILBOX);
-        //.present_mode(vk::PresentModeKHR::FIFO);
-        let loader = ash::extensions::khr::Swapchain::new(&instance, &dev);
+        let loader = ash::extensions::khr::Swapchain::new(instance, dev);
         let khr = unsafe { loader.create_swapchain(&create_info, None).unwrap() };
 
-        let mut image_views = Vec::with_capacity(image_count * 2);
-        let mut images = Vec::with_capacity(image_count);
-
-        // Swapchain images (buffers)
-        let display_images = unsafe { loader.get_swapchain_images(khr).unwrap() };
-        assert_eq!(display_images.len(), image_count);
-        for &display_image in &display_images {
-            // display
-            image_views.push(unsafe {
-                let subresource_range = vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1);
-                let info = vk::ImageViewCreateInfo::builder()
-                    .image(display_image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(surface_format.format)
-                    .subresource_range(*subresource_range);
-                dev.create_image_view(&info, None).unwrap()
-            });
-
-            // depth
-            image_views.push(unsafe {
-                let info = vk::ImageCreateInfo::builder()
-                    .image_type(vk::ImageType::TYPE_2D)
-                    .extent(vk::Extent3D {
-                        width: surface_capabilities.current_extent.width,
-                        height: surface_capabilities.current_extent.height,
-                        depth: 1,
-                    })
-                    .array_layers(1)
-                    .mip_levels(1)
-                    .format(vk::Format::D32_SFLOAT)
-                    .tiling(vk::ImageTiling::OPTIMAL)
-                    .initial_layout(vk::ImageLayout::UNDEFINED)
-                    .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-                    .samples(vk::SampleCountFlags::TYPE_1)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE);
-                let (depth_image, depth_alloc) = alloc
-                    .create_image(
-                        &info,
-                        &vk_mem::AllocationCreateInfo {
-                            flags: vk_mem::AllocationCreateFlags::STRATEGY_MIN_MEMORY,
-                            usage: vk_mem::MemoryUsage::AutoPreferDevice,
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap();
-                images.push((depth_image, depth_alloc));
-
-                let subresource_range = vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::DEPTH)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1);
-                let info = vk::ImageViewCreateInfo::builder()
-                    .image(depth_image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(vk::Format::D32_SFLOAT)
-                    .subresource_range(*subresource_range);
-                dev.create_image_view(&info, None).unwrap()
-            });
-        }
-
-        // Framebuffers
-        let mut framebuffers = Vec::with_capacity(image_count);
-        for iviews in image_views.chunks(2) {
-            let info = vk::FramebufferCreateInfo::builder()
-                .render_pass(render_pass)
-                .attachments(&iviews)
-                .width(surface_capabilities.current_extent.width)
-                .height(surface_capabilities.current_extent.height)
-                .layers(1);
-            let fb = unsafe { dev.create_framebuffer(&info, None).unwrap() };
-            framebuffers.push(fb);
-        }
-
-        let sc = SwapChain {
+        Self {
             loader,
             khr,
-            image_views,
-            framebuffers,
-            images,
-        };
-        (sc, surface_capabilities.current_extent)
+            surface_capabilities,
+            surface_format,
+        }
     }
 
-    pub unsafe fn drop_with(&mut self, dev: &ash::Device, alloc: &vk_mem::Allocator) {
-        for fb in self.framebuffers.drain(..) {
-            dev.destroy_framebuffer(fb, None);
-        }
-        for iv in self.image_views.drain(..) {
-            dev.destroy_image_view(iv, None);
-        }
-        for (buf, mut mem) in self.images.drain(..) {
-            alloc.destroy_image(buf, &mut mem);
-        }
+    pub unsafe fn drop_with(&mut self, dev: &ash::Device) {
         self.loader.destroy_swapchain(self.khr, None);
+    }
+
+    pub fn extent(&self) -> vk::Extent2D {
+        self.surface_capabilities.current_extent
+    }
+
+    pub fn format(&self) -> vk::Format {
+        self.surface_format.format
     }
 
     pub unsafe fn draw(
@@ -235,5 +148,14 @@ impl SwapChain {
         let suboptimal = self.loader.queue_present(queue, &present_info).unwrap();
 
         suboptimal
+    }
+
+    pub unsafe fn image_count(&self) -> usize {
+        // FIXME avoid allocation
+        self.loader.get_swapchain_images(self.khr).unwrap().len()
+    }
+
+    pub unsafe fn images(&self) -> Vec<vk::Image> {
+        self.loader.get_swapchain_images(self.khr).unwrap()
     }
 }

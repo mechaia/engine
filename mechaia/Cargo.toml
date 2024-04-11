@@ -7,4 +7,7 @@ edition = "2021"
 physics3d = { path = "../physics3d", package = "mechaia_physics3d" }
 render = { path = "../render", package = "mechaia_render" }
 window = { path = "../window", package = "mechaia_window" }
+gui = { path = "../gui", package = "mechaia_gui" }
+sound = { path = "../sound", package = "mechaia_sound" }
+util = { path = "../util", package = "mechaia_util" }
 glam = "0.27.0"

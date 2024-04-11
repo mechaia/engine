@@ -69,7 +69,16 @@ impl<T> Arena<T> {
         }
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
+    pub fn len(&self) -> usize {
+        // FIXME O(n) lmao
+        self.values().count()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &T> + '_ {
+        self.buf.iter().flat_map(|x| x.as_ref())
+    }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
         self.buf.iter_mut().flat_map(|x| x.as_mut())
     }
 }

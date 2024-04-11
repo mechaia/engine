@@ -1,0 +1,457 @@
+use ash::vk;
+use core::{ffi::CStr, mem};
+use glam::Vec2;
+use render::{
+    resource::texture::TextureSet,
+    stage::renderpass::{
+        RenderPassBuilder, RenderSubpass, RenderSubpassBuilder, SubpassAttachmentReferences,
+    },
+    Render,
+};
+use std::{
+    ptr::NonNull,
+    sync::{Arc, Mutex},
+};
+
+const ENTRY_POINT: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
+
+pub struct Gui {
+    shared: Shared,
+}
+
+pub struct Instance {
+    pub position: Vec2,
+    pub half_extents: Vec2,
+    pub rotation: f32,
+    pub uv_start: Vec2,
+    pub uv_end: Vec2,
+    pub texture: u32,
+}
+
+impl Gui {
+    pub fn draw(&mut self, index: usize, instances: &mut dyn Iterator<Item = Instance>) {
+        let sh = self.shared.lock().unwrap();
+        let data = &sh.data[index];
+        unsafe {
+            let mut p = data.instance_data_ptr.as_ptr();
+            for inst in instances.take(usize::try_from(sh.max_instances).unwrap()) {
+                p.write(InstanceData {
+                    half_extents: vec2_to_unorm16(inst.half_extents),
+                    rotation: rot_to_cossin(inst.rotation),
+                    position: vec2_to_snorm16(inst.position),
+                    uv_scale: vec2_to_snorm16(inst.uv_end - inst.uv_start),
+                    uv_offset: vec2_to_unorm16(inst.uv_start),
+                    texture_index: inst.texture,
+                    _padding: [0; 2],
+                });
+                p = p.add(1);
+            }
+            data.draw_parameters_ptr
+                .as_ptr()
+                .write(vk::DrawIndirectCommand {
+                    vertex_count: 4,
+                    instance_count: p
+                        .offset_from(data.instance_data_ptr.as_ptr())
+                        .try_into()
+                        .unwrap(),
+                    first_vertex: 0,
+                    first_instance: 0,
+                });
+        }
+    }
+}
+
+type Shared = Arc<Mutex<SharedData>>;
+
+struct SharedData {
+    max_instances: u32,
+    data: Box<[SubpassData]>,
+}
+
+struct Subpass {
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    shared: Shared,
+    texture_set: TextureSet,
+}
+
+struct SubpassData {
+    instance_data: render::VmaBuffer,
+    instance_data_ptr: NonNull<InstanceData>,
+    draw_parameters: render::VmaBuffer,
+    draw_parameters_ptr: NonNull<vk::DrawIndirectCommand>,
+}
+
+struct SubpassBuilder {
+    shared: Shared,
+    texture_set: TextureSet,
+}
+
+#[repr(C)]
+struct InstanceData {
+    half_extents: [u16; 2],
+    rotation: [i16; 2],
+    position: [i16; 2],
+    uv_scale: [i16; 2],
+    uv_offset: [u16; 2],
+    texture_index: u32,
+    _padding: [u32; 2],
+}
+
+#[must_use]
+pub fn push(
+    render: &mut Render,
+    render_pass: &mut RenderPassBuilder,
+    max_instances: u32,
+    texture_set: TextureSet,
+) -> Gui {
+    unsafe {
+        let shared = Arc::new(Mutex::new(SharedData {
+            data: [].into(),
+            max_instances,
+        }));
+
+        let subpass = render_pass.push(
+            SubpassBuilder {
+                shared: shared.clone(),
+                texture_set,
+            },
+            SubpassAttachmentReferences {
+                color: Box::new([vk::AttachmentReference {
+                    attachment: 0,
+                    layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                }]),
+                depth_stencil: None,
+            },
+        );
+        assert!(subpass > 0, "dependency on a previous subpass!");
+        render_pass.add_dependency(vk::SubpassDependency {
+            dependency_flags: vk::DependencyFlags::empty(),
+            src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            src_subpass: subpass - 1,
+            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_subpass: subpass,
+            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_READ
+                | vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+        });
+
+        Gui { shared }
+    }
+}
+
+unsafe impl RenderSubpassBuilder for SubpassBuilder {
+    unsafe fn build(
+        self: Box<Self>,
+        dev: &ash::Device,
+        render_pass: vk::RenderPass,
+        subpass: u32,
+    ) -> Box<dyn render::stage::renderpass::RenderSubpass> {
+        /*
+        let set_layout = {
+            let bindings = [vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)]
+            .map(|x| x.build());
+            let info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
+            dev.create_descriptor_set_layout(&info, None).unwrap()
+        };
+
+        let pool = {
+            let sizes = [vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::INPUT_ATTACHMENT,
+                // FIXME this depends on swapchain, whose exact framebuffer count depends on mode too
+                descriptor_count: 3,
+            }];
+            let info = vk::DescriptorPoolCreateInfo::builder()
+                .max_sets(1)
+                .pool_sizes(&sizes);
+            dev.create_descriptor_pool(&info, None).unwrap()
+        };
+
+        // FIXME this depends on swapchain, whose exact framebuffer count depends on mode too
+        let sets = {
+            let layouts = vec![set_layout; 3];
+            let info = vk::DescriptorSetAllocateInfo::builder()
+                .descriptor_pool(pool)
+                .set_layouts(&layouts);
+            dev.allocate_descriptor_sets(&info).unwrap()
+        };
+        */
+
+        /*
+        let data = sets
+            .into_iter()
+            .map(|set| {
+                let info = [vk::DescriptorImageInfo {
+                    sampler,
+                    i
+                }];
+                dev.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet::builder()
+                        .dst_set(set)
+                        .dst_binding(0)
+                        .dst_array_element(0)
+                        .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
+                        .image_info(info)]
+                    .map(|x| x.build()),
+                    &[],
+                );
+                SubpassData { set }
+            })
+            .collect();
+        */
+
+        let vertex_shader = make_shader(
+            dev,
+            vk_shader_macros::include_glsl!("shader/quad.glsl.vert", kind: vert),
+        );
+        let fragment_shader = make_shader(
+            dev,
+            vk_shader_macros::include_glsl!("shader/quad.glsl.frag", kind: frag),
+        );
+
+        let shader_stages = [
+            vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vertex_shader)
+                .name(ENTRY_POINT),
+            vk::PipelineShaderStageCreateInfo::builder()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(fragment_shader)
+                .name(ENTRY_POINT),
+        ]
+        .map(|x| x.build());
+
+        let attr_descrs = {
+            let f = |location, offset: u32, format| vk::VertexInputAttributeDescription {
+                location,
+                binding: 0,
+                format,
+                offset: offset * 4,
+            };
+            [
+                f(0, 0, vk::Format::R16G16_UNORM),
+                f(1, 1, vk::Format::R16G16_SNORM),
+                f(2, 2, vk::Format::R16G16_SNORM),
+                f(3, 3, vk::Format::R16G16_SNORM),
+                f(4, 4, vk::Format::R16G16_UNORM),
+                f(5, 5, vk::Format::R32_UINT),
+            ]
+        };
+        let binding_descrs = [vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: 8 * 4,
+            input_rate: vk::VertexInputRate::INSTANCE,
+        }];
+
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
+            .vertex_attribute_descriptions(&attr_descrs)
+            .vertex_binding_descriptions(&binding_descrs);
+        let input_assembly_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
+            .topology(vk::PrimitiveTopology::TRIANGLE_STRIP);
+        // set to default as we'll set it in the commands instead.
+        let viewports = [vk::Viewport::default()];
+        let scissors = [vk::Rect2D::default()];
+        let viewport_info = vk::PipelineViewportStateCreateInfo::builder()
+            .viewports(&viewports)
+            .scissors(&scissors);
+        let rasterizer_info = vk::PipelineRasterizationStateCreateInfo::builder()
+            .line_width(1.0)
+            .front_face(vk::FrontFace::CLOCKWISE)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .polygon_mode(vk::PolygonMode::FILL);
+        let multisampler_info = vk::PipelineMultisampleStateCreateInfo::builder()
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let colorblend_attachments = [vk::PipelineColorBlendAttachmentState::builder()
+            .blend_enable(true)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
+            .alpha_blend_op(vk::BlendOp::ADD)
+            .color_write_mask(
+                vk::ColorComponentFlags::R
+                    | vk::ColorComponentFlags::G
+                    | vk::ColorComponentFlags::B
+                    | vk::ColorComponentFlags::A,
+            )
+            .build()];
+        let colorblend_info =
+            vk::PipelineColorBlendStateCreateInfo::builder().attachments(&colorblend_attachments);
+
+        let depth_stencil_state = vk::PipelineDepthStencilStateCreateInfo::builder()
+            .depth_test_enable(false)
+            .depth_write_enable(false);
+
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
+
+        let layout = {
+            let layouts = [self.texture_set.layout()];
+            let push_constant_ranges = [vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::VERTEX,
+                offset: 0,
+                size: 8,
+            }];
+            let info = vk::PipelineLayoutCreateInfo::builder()
+                .set_layouts(&layouts)
+                .push_constant_ranges(&push_constant_ranges);
+            dev.create_pipeline_layout(&info, None).unwrap()
+        };
+
+        let pipeline_info = [vk::GraphicsPipelineCreateInfo::builder()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_info)
+            .input_assembly_state(&input_assembly_info)
+            .viewport_state(&viewport_info)
+            .rasterization_state(&rasterizer_info)
+            .multisample_state(&multisampler_info)
+            .color_blend_state(&colorblend_info)
+            .layout(layout)
+            .render_pass(render_pass)
+            .subpass(subpass)
+            .depth_stencil_state(&depth_stencil_state)
+            .dynamic_state(&dynamic_state)
+            .build()];
+        let pipeline = dev
+            .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
+            .unwrap()[0];
+
+        dev.destroy_shader_module(fragment_shader, None);
+        dev.destroy_shader_module(vertex_shader, None);
+
+        Box::new(Subpass {
+            pipeline,
+            layout,
+            shared: self.shared,
+            texture_set: self.texture_set,
+        })
+    }
+}
+
+unsafe impl RenderSubpass for Subpass {
+    unsafe fn record_commands(&self, dev: &ash::Device, args: &render::StageArgs) {
+        let sh = self.shared.lock().unwrap();
+        let data = &sh.data[args.index];
+
+        dev.cmd_bind_pipeline(args.cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+        dev.cmd_bind_descriptor_sets(
+            args.cmd,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.layout,
+            0,
+            &[self.texture_set.set()],
+            &[],
+        );
+        let viewports = [vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: args.viewport.width as f32,
+            height: args.viewport.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        }];
+        let scissors = [vk::Rect2D {
+            offset: vk::Offset2D::default(),
+            extent: args.viewport,
+        }];
+
+        let mut c = [0; 8];
+        c[..4].copy_from_slice(&(args.viewport.width as f32).to_le_bytes());
+        c[4..].copy_from_slice(&(args.viewport.height as f32).to_le_bytes());
+
+        dev.cmd_push_constants(args.cmd, self.layout, vk::ShaderStageFlags::VERTEX, 0, &c);
+
+        dev.cmd_set_viewport(args.cmd, 0, &viewports);
+        dev.cmd_set_scissor(args.cmd, 0, &scissors);
+        dev.cmd_bind_vertex_buffers(args.cmd, 0, &[data.instance_data.0], &[0]);
+        dev.cmd_draw_indirect(
+            args.cmd,
+            data.draw_parameters.0,
+            0,
+            1,
+            mem::size_of::<vk::DrawIndirectCommand>() as u32,
+        );
+        //dev.cmd_draw(args.cmd, 4, 1, 0, 0);
+    }
+
+    unsafe fn rebuild_swapchain(&mut self, dev: &mut render::Dev, swapchain: &render::SwapChain) {
+        let mut sh = self.shared.lock().unwrap();
+        let mut data = mem::take(&mut sh.data).into_vec();
+
+        let new_len = swapchain.image_count();
+        if new_len > data.len() {
+            data.resize_with(new_len, || {
+                let mut instance_data = dev.allocate_buffer(
+                    4 * 8 * u64::from(sh.max_instances),
+                    vk::BufferUsageFlags::VERTEX_BUFFER,
+                    true,
+                );
+                let mut draw_parameters = dev.allocate_buffer(
+                    4 + 1 * mem::size_of::<vk::DrawIndirectCommand>() as u64,
+                    vk::BufferUsageFlags::INDIRECT_BUFFER,
+                    true,
+                );
+                let instance_data_ptr = dev.map_buffer(&mut instance_data).cast::<InstanceData>();
+                let draw_parameters_ptr = dev
+                    .map_buffer(&mut draw_parameters)
+                    .cast::<vk::DrawIndirectCommand>();
+                draw_parameters_ptr.as_ptr().write(vk::DrawIndirectCommand {
+                    vertex_count: 0,
+                    instance_count: 0,
+                    first_vertex: 0,
+                    first_instance: 0,
+                });
+                SubpassData {
+                    instance_data,
+                    instance_data_ptr,
+                    draw_parameters,
+                    draw_parameters_ptr,
+                }
+            });
+        } else {
+            while data.len() > new_len {
+                let d = data.pop().unwrap();
+                unsafe {
+                    dev.free_buffer(d.instance_data);
+                    dev.free_buffer(d.draw_parameters);
+                }
+            }
+        }
+
+        sh.data = data.into();
+    }
+}
+
+unsafe fn make_shader(dev: &ash::Device, code: &[u32]) -> vk::ShaderModule {
+    let info = vk::ShaderModuleCreateInfo::builder().code(code);
+    dev.create_shader_module(&info, None).unwrap()
+}
+
+fn rot_to_cossin(rot: f32) -> [i16; 2] {
+    let (s, c) = rot.sin_cos();
+    [f32_to_snorm16(s), f32_to_snorm16(c)]
+}
+
+fn f32_to_unorm16(x: f32) -> u16 {
+    debug_assert!((0.0..=1.0).contains(&x), "0 <= {x} <= 1");
+    (x * f32::from(u16::MAX)) as u16
+}
+
+fn f32_to_snorm16(x: f32) -> i16 {
+    debug_assert!((-1.0..=1.0).contains(&x), "-1 <= {x} <= 1");
+    (x * f32::from(i16::MAX)) as i16
+}
+
+fn vec2_to_unorm16(v: Vec2) -> [u16; 2] {
+    [f32_to_unorm16(v.x), f32_to_unorm16(v.y)]
+}
+
+fn vec2_to_snorm16(v: Vec2) -> [i16; 2] {
+    [f32_to_snorm16(v.x), f32_to_snorm16(v.y)]
+}

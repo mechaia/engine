@@ -6,27 +6,7 @@ use ash::vk;
 use glam::{U16Vec2, U64Vec2, UVec2, UVec3};
 use vk_mem::Alloc;
 
-use crate::{VmaImage, Vulkan};
-
-pub struct PbrMaterialCollection {
-    /// all textures are put into an atlas to reduce descriptor usage
-    pub textures: TextureAtlas,
-    pub views: Box<[PbrMaterialView]>,
-}
-
-#[repr(C, align(16))]
-pub(crate) struct PbrMaterialView {
-    pub albedo: [f32; 3],
-    pub albedo_texture_index: u32,
-    pub roughness: f32,
-    pub roughness_texture_id: u32,
-    pub metallic: f32,
-    pub metallic_texture_id: u32,
-    pub ambient_occlusion: f32,
-    pub ambient_occlusion_texture_id: u32,
-}
-
-pub type PbrMaterial = PbrMaterialView;
+use crate::{Render, VmaImage};
 
 pub(crate) struct TextureAtlas {
     texture: VmaImage,
@@ -34,7 +14,7 @@ pub(crate) struct TextureAtlas {
 }
 
 impl TextureAtlas {
-    pub unsafe fn pack_textures(vulkan: &mut Vulkan, textures: &mut [Texture]) -> Self {
+    pub unsafe fn pack_textures(render: &mut Render, textures: &mut [Texture]) -> Self {
         // sort large to small
         // TODO indirect to preserve the order of the original textures
         let f = |t: &Texture| U64Vec2::from(t.dim).element_product();
@@ -43,7 +23,7 @@ impl TextureAtlas {
         // TODO try smaller sizes
         let size_p2 = 12;
         let mapping = pack_textures(size_p2, textures);
-        let texture = create_texture_atlas(vulkan, size_p2, textures, &mapping);
+        let texture = create_texture_atlas(render, size_p2, textures, &mapping);
         Self { texture, mapping }
     }
 }
@@ -91,15 +71,16 @@ fn pack_textures(size_p2: u8, textures: &[Texture]) -> Box<[U16Vec2]> {
 }
 
 unsafe fn create_texture_atlas(
-    vulkan: &mut Vulkan,
+    render: &mut Render,
     size_p2: u8,
     textures: &[Texture],
     mapping: &[U16Vec2],
 ) -> VmaImage {
     let dim = 1 << size_p2;
 
-    let img = vulkan
-        .allocator
+    let img = render
+        .dev
+        .alloc
         .create_image(
             &vk::ImageCreateInfo::builder()
                 .image_type(vk::ImageType::TYPE_2D)
@@ -115,7 +96,7 @@ unsafe fn create_texture_atlas(
                 .tiling(vk::ImageTiling::OPTIMAL)
                 .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .queue_family_indices(&[vulkan.commands.queues.graphics_index])
+                .queue_family_indices(&[render.commands.queues.graphics_index])
                 .initial_layout(vk::ImageLayout::UNDEFINED),
             &vk_mem::AllocationCreateInfo {
                 flags: vk_mem::AllocationCreateFlags::STRATEGY_MIN_MEMORY,
@@ -129,9 +110,8 @@ unsafe fn create_texture_atlas(
         let data = tex.decode_to_vec();
         assert_eq!(data.len(), usize::from(pos.x) * usize::from(pos.y));
         let f = |v: UVec2| UVec3::new(v.x.into(), v.y.into(), 0);
-        vulkan.commands.transfer_to_image_with(
-            &vulkan.dev,
-            &vulkan.allocator,
+        render.commands.transfer_to_image_with(
+            &render.dev,
             img.0,
             f(UVec2::from(*pos)),
             &mut |s| s.copy_from_slice(&data),

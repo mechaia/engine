@@ -1,6 +1,6 @@
 use ash::vk;
 use core::{mem, ptr::NonNull};
-use glam::{Mat4, Vec2};
+use glam::Mat4;
 use vk_mem::Alloc;
 
 #[repr(C)]

@@ -6,7 +6,7 @@ members = [
 	"terrain",
 	"game",
 	"util", "physics3d", "window",
-	"mechaia", "gui",
+	"mechaia", "gui", "sound",
 ]
 
 [profile.dev.package."*"]

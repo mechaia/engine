@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+ash = "0.37.3"
 render = { path = "../render", package = "mechaia_render" }
+vk-shader-macros = "0.2.9"
+glam = "0.27.0"

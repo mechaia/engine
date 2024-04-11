@@ -10,9 +10,8 @@ layout (binding = 0) uniform Camera {
 
 struct Instance {
 	vec3 position;
-	float scale;
-	vec3 rotation;
 	uint instance;
+	vec4 rotation;
 };
 
 layout(std430, binding = 1) buffer In {
@@ -44,10 +43,11 @@ void main() {
 	uint index = gl_GlobalInvocationID.x;
 	Instance inst = instances[index];
 
-	vec4 rotation = vec4(inst.rotation, sqrt(max(0, 1 - dot(inst.rotation, inst.rotation))));
+	//vec4 rotation = vec4(inst.rotation, sqrt(max(0, 1 - dot(inst.rotation, inst.rotation))));
+	vec4 rotation = inst.rotation;
 
 	// copied from https://docs.rs/glam/0.27.0/src/glam/f32/sse2/mat4.rs.html#215-223
-	mat3 axes = quat_to_axes(rotation) * inst.scale;
+	mat3 axes = quat_to_axes(rotation);
 
 	projections[index] = projection * mat4(
 		vec4(axes[0], 0),

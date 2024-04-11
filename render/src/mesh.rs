@@ -1,4 +1,4 @@
-use crate::{VmaBuffer, Vulkan};
+use crate::{Render, VmaBuffer};
 use ash::vk;
 use core::mem;
 use vk_mem::Alloc;
@@ -10,14 +10,15 @@ pub struct MeshCollectionBuilder<'a> {
     pub meshes: &'a [Mesh],
 }
 
-unsafe fn alloc_buf(vulkan: &mut Vulkan, size: u64, as_index: bool) -> VmaBuffer {
+unsafe fn alloc_buf(render: &mut Render, size: u64, as_index: bool) -> VmaBuffer {
     let usage = if as_index {
         vk::BufferUsageFlags::INDEX_BUFFER
     } else {
         vk::BufferUsageFlags::VERTEX_BUFFER
     };
-    vulkan
-        .allocator
+    render
+        .dev
+        .alloc
         .create_buffer_with_alignment(
             &vk::BufferCreateInfo::builder()
                 .size(size)
@@ -36,15 +37,15 @@ unsafe fn alloc_buf(vulkan: &mut Vulkan, size: u64, as_index: bool) -> VmaBuffer
 }
 
 unsafe fn merge(
-    vulkan: &mut Vulkan,
+    render: &mut Render,
     buf: vk::Buffer,
     offt: &mut u64,
     it: &mut dyn Iterator<Item = (*const u8, usize)>,
 ) {
     for (ptr, len) in it {
-        vulkan
+        render
             .commands
-            .transfer_to(&vulkan.dev, &vulkan.allocator, buf, *offt, ptr, len);
+            .transfer_to(&render.dev, buf, *offt, ptr, len);
         *offt += len as u64;
     }
 }
@@ -54,7 +55,7 @@ fn as_bytes<T>(slice: &[T]) -> (*const u8, usize) {
 }
 
 impl MeshCollectionBuilder<'_> {
-    pub fn finish(self, vulkan: &mut Vulkan) -> MeshCollection {
+    pub fn finish(self, render: &mut Render) -> MeshCollection {
         let mut index_count @ mut vertex_count = 0;
         let positions_offset @ mut normals_offset @ mut uvs_offset = 0;
         for m in self.meshes.iter() {
@@ -71,25 +72,25 @@ impl MeshCollectionBuilder<'_> {
         let vertex_data_size = vertex_count * (3 + 3 + 2) * 4;
 
         unsafe {
-            let index_data = alloc_buf(vulkan, index_data_size, true);
-            let vertex_data = alloc_buf(vulkan, vertex_data_size, false);
+            let index_data = alloc_buf(render, index_data_size, true);
+            let vertex_data = alloc_buf(render, vertex_data_size, false);
 
             let it = || self.meshes.iter();
             merge(
-                vulkan,
+                render,
                 index_data.0,
                 &mut 0,
                 &mut it().map(|m| as_bytes(&m.indices)),
             );
             let mut offt = 0;
             let mut v_merge = |it: &mut dyn Iterator<Item = _>| {
-                merge(vulkan, vertex_data.0, &mut offt, it);
+                merge(render, vertex_data.0, &mut offt, it);
             };
             v_merge(&mut it().map(|m| as_bytes(&m.positions)));
             v_merge(&mut it().map(|m| as_bytes(&m.normals)));
             v_merge(&mut it().map(|m| as_bytes(&m.uvs)));
 
-            vulkan.dev.device_wait_idle().unwrap();
+            render.dev.device_wait_idle().unwrap();
             MeshCollection {
                 index_data,
                 vertex_data,
@@ -133,7 +134,7 @@ pub struct MeshView {
 
 impl MeshCollection {
     pub fn len(&self) -> usize {
-        self.mesh_index_offsets.len()
+        self.mesh_index_offsets.len() - 1
     }
 
     pub fn mesh(&self, index: usize) -> MeshView {
