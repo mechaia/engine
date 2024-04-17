@@ -42,10 +42,10 @@ struct PbrMaterialData {
     metallic: f32,
     ambient_occlusion: f32,
     _padding: f32,
+    albedo_texture_index: u32,
     roughness_texture_id: u32,
     metallic_texture_id: u32,
     ambient_occlusion_texture_id: u32,
-    albedo_texture_index: u32,
 }
 
 impl PbrMaterialSet {

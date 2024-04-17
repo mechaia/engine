@@ -1,3 +1,5 @@
+pub mod wheel;
+
 use glam::{Quat, Vec3};
 use rapier3d::{
     dynamics::{
@@ -5,11 +7,11 @@ use rapier3d::{
         RigidBody, RigidBodyBuilder, RigidBodySet,
     },
     geometry::{
-        self, BroadPhase, Collider, ColliderBuilder, ColliderSet, NarrowPhase, SharedShape,
+        self, BroadPhase, Collider, ColliderBuilder, ColliderSet, NarrowPhase, Ray, SharedShape,
     },
     math::{Isometry, Point, Translation, Vector},
     na::{Quaternion, Unit},
-    pipeline::{PhysicsPipeline, QueryPipeline},
+    pipeline::{PhysicsPipeline, QueryFilter, QueryFilterFlags, QueryPipeline},
 };
 use std::num::NonZeroU32;
 use std::ops::Index;
@@ -52,6 +54,7 @@ pub struct ColliderProperties {
     pub local_transform: Transform,
     pub friction: f32,
     pub bounciness: f32,
+    pub user_data: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -65,6 +68,12 @@ pub struct SetRigidBodyProperties {
     pub linear_velocity: Option<Vec3>,
     pub angular_velocity: Option<Vec3>,
     pub enable_ccd: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CastRayResult {
+    pub distance: f32,
+    pub user_data: u32,
 }
 
 impl Physics {
@@ -95,6 +104,10 @@ impl Physics {
         self.integration_parameters.dt = dt;
     }
 
+    pub fn time_delta(&self) -> f32 {
+        self.integration_parameters.dt
+    }
+
     pub fn set_gravity(&mut self, acceleration: Vec3) {
         self.gravity = acceleration;
     }
@@ -115,6 +128,8 @@ impl Physics {
             &self.physics_hooks,
             &self.event_handler,
         );
+        self.query_pipeline
+            .update(&self.rigid_body_set, &self.collider_set);
     }
 
     fn insert_rigid_body(&mut self, body: RigidBody) -> RigidBodyHandle {
@@ -200,6 +215,19 @@ impl Physics {
         SensorHandle(h)
     }
 
+    pub fn remove_collider(&mut self, body: RigidBodyHandle, collider: ColliderHandle) {
+        self.collider_set.remove(
+            collider.0,
+            &mut self.island_manager,
+            &mut self.rigid_body_set,
+            true,
+        );
+    }
+
+    pub fn rigid_body_mass(&self, body: RigidBodyHandle) -> f32 {
+        self.rigid_body_set[body.0].mass()
+    }
+
     pub fn set_rigid_body_properties(
         &mut self,
         body: RigidBodyHandle,
@@ -255,6 +283,42 @@ impl Physics {
             true,
         );
     }
+
+    pub fn cast_ray(&self, start: Vec3, length: Vec3, ignore_body: Option<RigidBodyHandle>) -> Option<CastRayResult> {
+        let max_toi = length.length();
+        let ray = Ray {
+            origin: glam_to_point(start),
+            // from docs:
+            //   max_toi: the maximum time-of-impact that can be reported by this cast.
+            //   This effectively limits the length of the ray to ray.dir.norm() * max_toi. Use Real::MAX for an unbounded ray.
+            // safe to assume we don't need to normalize the direction
+            dir: glam_to_vector(length.normalize()),
+        };
+        let filter = QueryFilter {
+            flags: QueryFilterFlags::empty(),
+            groups: None,
+            exclude_collider: None,
+            exclude_rigid_body: ignore_body.map(|h| h.0),
+            predicate: None,
+        };
+        self.query_pipeline
+            .cast_ray(
+                &self.rigid_body_set,
+                &self.collider_set,
+                &ray,
+                max_toi,
+                true,
+                filter,
+            )
+            .map(|(collider, distance)| CastRayResult {
+                distance,
+                user_data: self.collider_set[collider].user_data as u32,
+            })
+    }
+
+    pub fn velocity_at_world_point(&self, body: RigidBodyHandle, point: Vec3) -> Vec3 {
+        vector_to_glam(self.rigid_body_set[body.0].velocity_at_point(&glam_to_point(point)))
+    }
 }
 
 fn glam_to_point(v: Vec3) -> Point<f32> {
@@ -300,5 +364,36 @@ fn isometry_to_transform(iso: Isometry<f32>) -> Transform {
     Transform {
         translation: translation_to_glam(iso.translation),
         rotation: rotation_to_glam(iso.rotation),
+    }
+}
+
+impl Transform {
+    pub fn apply_to_translation(&self, translation: Vec3) -> Vec3 {
+        self.translation + (self.rotation * translation)
+    }
+
+    pub fn apply_to_direction(&self, direction: Vec3) -> Vec3 {
+        self.rotation * direction
+    }
+
+    pub fn apply_to_direction_inv(&self, direction: Vec3) -> Vec3 {
+        self.rotation.inverse() * direction
+    }
+
+    pub fn apply_to_transform(&self, transform: &Self) -> Self {
+        Self {
+            translation: self.translation + self.rotation * transform.translation,
+            rotation: self.rotation * transform.rotation,
+        }
+    }
+}
+
+impl From<Transform> for util::Transform {
+    fn from(value: Transform) -> Self {
+        Self {
+            translation: value.translation,
+            rotation: value.rotation,
+            scale: 1.0,
+        }
     }
 }

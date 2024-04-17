@@ -1,0 +1,10 @@
+[package]
+name = "mechaia_voxel_render"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+render = { path = "../../render", package = "mechaia_render" }
+util = { path = "../../util", package = "mechaia_util" }
+ash = "0.37.3"
+glam = "0.27.0"

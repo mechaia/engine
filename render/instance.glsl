@@ -5,17 +5,17 @@
 layout(local_size_x = 1 << 0, local_size_y = 1, local_size_z = 1) in;
 
 layout (binding = 0) uniform Camera {
-	mat4 projection;
+	mat4 world_to_view;
 };
 
-struct Instance {
-	vec3 position;
-	uint instance;
+struct Transform {
 	vec4 rotation;
+	vec3 position;
+	float scale;
 };
 
-layout(std430, binding = 1) buffer In {
-	Instance instances[];
+layout(std430, binding = 1) readonly buffer Transforms {
+	Transform transforms[];
 };
 
 layout(std430, binding = 2) writeonly buffer Out {
@@ -41,17 +41,17 @@ mat3 quat_to_axes(vec4 r) {
 
 void main() {
 	uint index = gl_GlobalInvocationID.x;
-	Instance inst = instances[index];
+	Transform trf = transforms[index];
 
 	//vec4 rotation = vec4(inst.rotation, sqrt(max(0, 1 - dot(inst.rotation, inst.rotation))));
-	vec4 rotation = inst.rotation;
+	vec4 rotation = trf.rotation;
 
 	// copied from https://docs.rs/glam/0.27.0/src/glam/f32/sse2/mat4.rs.html#215-223
 	mat3 axes = quat_to_axes(rotation);
 
-	projections[index] = projection * mat4(
+	projections[index] = world_to_view * mat4(
 		vec4(axes[0], 0),
 		vec4(axes[1], 0),
 		vec4(axes[2], 0),
-		vec4(inst.position, 1));
+		vec4(trf.position, 1));
 }

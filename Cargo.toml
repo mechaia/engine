@@ -6,7 +6,8 @@ members = [
 	"terrain",
 	"game",
 	"util", "physics3d", "window",
-	"mechaia", "gui", "sound",
+	"mechaia", "gui", "sound", "model",
+	"voxel/render", "voxel/common",
 ]
 
 [profile.dev.package."*"]

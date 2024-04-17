@@ -1,16 +1,12 @@
 pub mod resource;
 pub mod stage;
 
-mod camera;
 mod command;
 mod descriptor;
-mod draw;
 mod material;
-mod mesh;
 mod queues;
 mod swapchain;
 
-pub use mesh::Mesh;
 pub use stage::{Stage, StageArgs};
 pub use swapchain::SwapChain;
 
@@ -20,20 +16,6 @@ use std::{backtrace::Backtrace, ptr::NonNull};
 use vk_mem::{Alloc, AllocatorCreateInfo};
 
 const TIMEOUT: u64 = 100_000_000;
-
-pub struct Camera {
-    pub translation: glam::Vec3,
-    pub rotation: glam::Quat,
-    pub projection: CameraProjection,
-    pub aspect: f32,
-    pub near: f32,
-    pub far: f32,
-}
-
-pub enum CameraProjection {
-    Perspective { fov: f32 },
-    Orthographic { scale: f32 },
-}
 
 pub type VmaBuffer = (vk::Buffer, vk_mem::Allocation);
 type VmaImage = (vk::Image, vk_mem::Allocation);
@@ -65,6 +47,10 @@ unsafe extern "system" fn vulkan_debug_utils_callback(
     vk::FALSE
 }
 
+fn env_true(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| !["", "0"].contains(&&*v))
+}
+
 pub struct Dev {
     dev: ash::Device,
     alloc: vk_mem::Allocator,
@@ -84,7 +70,7 @@ impl Dev {
             .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .queue_family_indices(&queue_family_indices);
-        let mut flags = vk_mem::AllocationCreateFlags::empty();
+        let mut flags = vk_mem::AllocationCreateFlags::STRATEGY_MIN_MEMORY;
         if host {
             flags |= vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE;
         }
@@ -142,7 +128,6 @@ pub struct Render {
     surface_format: vk::SurfaceFormatKHR,
     swapchain: swapchain::SwapChain,
     swapchain_draw: swapchain::Draw,
-    camera: camera::Camera,
     commands: command::Commands,
     command_buffers: Box<[vk::CommandBuffer]>,
     stages: util::Arena<Box<[Box<dyn Stage>]>>,
@@ -167,7 +152,6 @@ impl Drop for Render {
             let _ = self.dev.dev.device_wait_idle();
             self.swapchain.drop_with(&self.dev.dev);
             self.swapchain_draw.drop_with(&self.dev.dev);
-            self.camera.drop_with(&self.dev.alloc);
             self.commands.drop_with(&self.dev.alloc);
         }
     }
@@ -252,12 +236,16 @@ fn select_device(instance: &ash::Instance) -> (vk::PhysicalDevice, vk::PhysicalD
     // Select device
     let phys_devs = unsafe { instance.enumerate_physical_devices().unwrap() };
     let mut chosen = None;
+    let force_cpu = env_true("MECHAIA_RENDER_FORCE_CPU");
     for p in phys_devs {
         let properties = unsafe { instance.get_physical_device_properties(p) };
         if properties.device_type == vk::PhysicalDeviceType::CPU {
-            //continue;
-            chosen = Some((p, properties));
-            break;
+            if force_cpu || chosen.is_none() {
+                chosen = Some((p, properties));
+            }
+            if force_cpu {
+                break;
+            }
         } else if properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
             chosen = Some((p, properties));
         } else if chosen.is_none() {
@@ -345,7 +333,10 @@ fn init(
     extension_names
         .extend_from_slice(ash_window::enumerate_required_extensions(raw_display_handle).unwrap());
 
-    layer_names.push(b"VK_LAYER_KHRONOS_validation\0".as_ptr() as *const i8);
+    if env_true("MECHAIA_RENDER_VALIDATION") {
+        layer_names.push(b"VK_LAYER_KHRONOS_validation\0".as_ptr() as *const i8);
+    }
+
     extension_names.push(ash::extensions::ext::DebugUtils::name().as_ptr());
 
     let app_info = vk::ApplicationInfo::builder()
@@ -420,8 +411,6 @@ fn init(
         image_count as u32,
     );
 
-    let camera = unsafe { camera::Camera::new(&alloc, image_count) };
-
     let swapchain_draw = swapchain::Draw::new(&dev, image_count);
 
     let command_buffers = unsafe {
@@ -447,7 +436,6 @@ fn init(
         swapchain_draw,
         commands,
         command_buffers,
-        camera,
         stages: Default::default(),
     }
 }
@@ -482,17 +470,11 @@ impl Render {
         StageSetHandle(h)
     }
 
-    pub fn draw(
-        &mut self,
-        camera: &Camera,
-        stage_set: StageSetHandle,
-        update: &mut dyn FnMut(usize),
-    ) {
+    pub fn draw(&mut self, stage_set: StageSetHandle, update: &mut dyn FnMut(usize)) {
         unsafe {
             self.swapchain
                 .draw(&self.dev, &mut self.swapchain_draw, |info| {
                     update(info.index);
-                    self.camera.set(info.index, camera);
                     let cmdbufs = [self.command_buffers[info.index]];
                     let avail = [info.available];
                     let finish = [info.finished];

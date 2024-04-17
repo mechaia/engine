@@ -1,7 +1,12 @@
+pub mod bit;
+pub mod soa;
+
 use core::{
+    mem,
     num::NonZeroU32,
     ops::{Index, IndexMut},
 };
+use glam::{Quat, Vec3};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BitMap8(u8);
@@ -29,6 +34,10 @@ pub struct ArenaHandle(NonZeroU32);
 impl ArenaHandle {
     pub fn as_u32(&self) -> u32 {
         self.0.get() - 1
+    }
+
+    fn as_index(&self) -> usize {
+        usize::try_from(self.0.get()).unwrap() - 1
     }
 }
 
@@ -69,6 +78,10 @@ impl<T> Arena<T> {
         }
     }
 
+    pub fn remove(&mut self, handle: ArenaHandle) -> Option<T> {
+        self.buf.get_mut(handle.as_index()).and_then(|v| v.take())
+    }
+
     pub fn len(&self) -> usize {
         // FIXME O(n) lmao
         self.values().count()
@@ -80,5 +93,32 @@ impl<T> Arena<T> {
 
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
         self.buf.iter_mut().flat_map(|x| x.as_mut())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Transform {
+    pub translation: Vec3,
+    pub rotation: Quat,
+    pub scale: f32,
+}
+
+pub struct ChunkedVec<T, const CHUNK_SIZE: usize = 64> {
+    buf: Vec<Box<[mem::MaybeUninit<T>; CHUNK_SIZE]>>,
+    len: usize,
+}
+
+impl<T, const CHUNK_SIZE: usize> ChunkedVec<T, CHUNK_SIZE> {
+    pub fn push(&mut self) {
+        todo!();
+    }
+}
+
+impl<T, const CHUNK_SIZE: usize> Default for ChunkedVec<T, CHUNK_SIZE> {
+    fn default() -> Self {
+        Self {
+            buf: Default::default(),
+            len: 0,
+        }
     }
 }

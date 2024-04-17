@@ -1,5 +1,5 @@
 use mechaia::{
-    math::{EulerRot, Quat, UVec2, Vec2, Vec3},
+    math::{EulerRot, Quat, UVec2, Vec2, Vec3, Vec4},
     physics3d, render,
     window::{self, Event, InputKey},
 };
@@ -54,7 +54,7 @@ fn main() {
     );
 
     //let meshes = render::Mesh::from_glb_slice(include_bytes!("/tank/games/Mechaia/a0-wheel.glb"));
-    let meshes = render::Mesh::from_glb_slice(include_bytes!("/tmp/untitled.glb"));
+    let models = mechaia::model::gltf::from_glb_slice(include_bytes!("/tmp/untitled.glb"));
 
     let mut window = window::Window::new();
 
@@ -62,6 +62,18 @@ fn main() {
         let (a, b) = window.render_handles();
         render::Render::new(a, b)
     };
+
+    let mesh_set = mechaia::render::resource::mesh::MeshSet::new(
+        &mut render,
+        &models
+            .meshes
+            .iter()
+            .map(|m| mechaia::render::resource::mesh::Mesh {
+                indices: &m.indices,
+                vertices: m.vertices.as_slice(),
+            })
+            .collect::<Vec<_>>(),
+    );
 
     let texture_set = {
         use render::resource::texture::{TextureFormat, TextureSet};
@@ -136,7 +148,7 @@ fn main() {
         use render::resource::material::pbr::*;
         PbrMaterialSet::builder(&mut render, 2)
             .push(&PbrMaterial {
-                albedo: render::Rgb::new(1.0, 1.0, 1.0),
+                albedo: Vec4::new(1.0, 1.0, 1.0, 1.0),
                 roughness: 0.5,
                 metallic: 0.5,
                 ambient_occlusion: 1.0,
@@ -146,7 +158,7 @@ fn main() {
                 ambient_occlusion_texture: tex_white,
             })
             .push(&PbrMaterial {
-                albedo: render::Rgb::new(1.0, 1.0, 0.0),
+                albedo: Vec4::new(1.0, 1.0, 0.0, 1.0),
                 roughness: 0.5,
                 metallic: 0.5,
                 ambient_occlusion: 1.0,
@@ -168,7 +180,8 @@ fn main() {
             &mut renderpass,
             texture_set,
             material_set,
-            &meshes,
+            mesh_set,
+            false,
         );
         let gui = mechaia::gui::push(&mut render, &mut renderpass, 1024, texture_set_gui);
         let renderpass = renderpass.build(&mut render);
@@ -227,46 +240,73 @@ fn main() {
         let tr = physics.rigid_body_transform(ball_body);
 
         let mut f = |index| unsafe {
-            use render::stage::standard3d::InstanceData;
+            use render::stage::standard3d::{Instance, Transform};
             let data = [
-                InstanceData {
+                Transform {
                     translation: tr.translation,
                     rotation: tr.rotation,
-                    material: mat_plain_white,
-                    //material: mat_smiley_yellow,
                 },
-                InstanceData {
+                Transform {
                     translation: Vec3::ZERO,
                     rotation: Quat::from_rotation_x(-1.0),
-                    material: mat_plain_white,
                 },
-                InstanceData {
+                Transform {
                     translation: Vec3::new(0.0, 4.0, 0.0),
                     rotation: Quat::from_rotation_z(total_t),
-                    material: mat_plain_white,
                 },
-                InstanceData {
+                Transform {
                     translation: Vec3::new(-3.0, -2.0, 0.0),
                     rotation: Quat::IDENTITY,
-                    material: mat_smiley_yellow,
                 },
-                InstanceData {
+                Transform {
                     translation: Vec3::new(-3.0, 2.0, 0.0),
                     rotation: Quat::from_rotation_y(2.0),
-                    material: mat_plain_white,
                 },
-                InstanceData {
+                Transform {
                     translation: Vec3::new(-3.0, 4.0, 0.0),
                     rotation: Quat::IDENTITY,
-                    material: mat_plain_white,
                 },
-                InstanceData {
+                Transform {
                     translation: Vec3::new(0.0, 0.0, 5.0),
                     rotation: Quat::IDENTITY,
+                },
+                Transform {
+                    translation: Vec3::new(0.0, 0.0, 3.0),
+                    rotation: Quat::IDENTITY,
+                },
+            ];
+            pbr.set_transform_data(index, &mut data.into_iter());
+            let data = [
+                Instance {
+                    transforms_offset: 0,
+                    material: mat_smiley_yellow,
+                },
+                Instance {
+                    transforms_offset: 1,
+                    material: mat_plain_white,
+                },
+                Instance {
+                    transforms_offset: 2,
+                    material: mat_plain_white,
+                },
+                Instance {
+                    transforms_offset: 3,
+                    material: mat_smiley_yellow,
+                },
+                Instance {
+                    transforms_offset: 4,
+                    material: mat_plain_white,
+                },
+                Instance {
+                    transforms_offset: 5,
+                    material: mat_plain_white,
+                },
+                Instance {
+                    transforms_offset: 6,
                     material: mat_smiley_yellow,
                 },
             ];
-            pbr.set_instance_data(index, &[3, 3, 1, 0], &mut data.into_iter());
+            pbr.set_instance_data(index, &[3, 3, 1], &mut data.into_iter());
 
             gui.draw(
                 index,

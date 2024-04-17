@@ -72,6 +72,7 @@ pub enum InputKey {
     PrintScreen,
     PageUp,
     PageDown,
+    F12,
 }
 
 impl Window {
@@ -162,6 +163,7 @@ impl Window {
                                 (NamedKey::PrintScreen, _) => PrintScreen,
                                 (NamedKey::PageUp, _) => PageUp,
                                 (NamedKey::PageDown, _) => PageDown,
+                                (NamedKey::F12, _) => F12,
                                 n => todo!("{:?}", n),
                             },
                             Key::Dead(_) => todo!(),

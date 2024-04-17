@@ -30,7 +30,7 @@ struct Material {
     uint ambient_occlusion_texture_index;
 };
 
-layout (std430, binding = 1) readonly buffer DirectionalLights {
+layout (std430, binding = 2) readonly buffer DirectionalLights {
     DirectionalLight directional_lights[MAX_DIRECTIONAL_LIGHTS];
 };
 
@@ -69,10 +69,7 @@ float metallic;
 
 vec3 reflectivity;
 
-float pow5(float x) {
-    float x2 = x * x;
-    return x2 * x2 * x;
-}
+bool error;
 
 float DistributionGGX(vec3 N, vec3 H) {
     float a      = roughness*roughness;
@@ -83,20 +80,22 @@ float DistributionGGX(vec3 N, vec3 H) {
     float num   = a2;
     float denom = (NdotH2 * (a2 - 1.0) + 1.0);
     denom = PI * (denom * denom);
+    if (denom < 0.0)
+        error = true;
 	
     return num / denom;
 }
 
 vec3 fresnelSchlick(float cosTheta) {
     //return reflectivity + (1.0 - reflectivity) * pow(2.0, (-5.55473 * cosTheta - 6.98316) * cosTheta);
-    return reflectivity + (1.0 - reflectivity) * pow5(clamp(1.0 - cosTheta, 0.0, 1.0));
+    return reflectivity + (1.0 - reflectivity) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-float GeometrySchlickGGX(float NdotV) {
+float GeometrySchlickGGX(float dotp) {
     float r = roughness + 1.0;
     float k = (r*r) / 8.0;
 
-    return 1.0 / (NdotV * (1.0 - k) + k);
+    return 1.0 / (dotp * (1.0 - k) + k);
 }
 
 float GeometrySmith(vec3 ray) {
@@ -111,6 +110,8 @@ float GeometrySmith(vec3 ray) {
 // Should be good for performance too :)
 vec3 calc_radiance(vec3 ray, vec3 light_color) {
     vec3 halfway_normal = normalize(ray + view_normal);
+
+    error = error || length(ray + view_normal) < 1e-3;
 
     // cook-torrance brdf
     float normal_distribution = DistributionGGX(normal, halfway_normal);
@@ -130,7 +131,8 @@ vec3 calc_radiance(vec3 ray, vec3 light_color) {
 
 void main() {
     normal = normalize(normal_unnormalized);
-    view_normal = normalize(position);
+    view_normal = normalize(-position);
+    //view_normal = normalize(position);
 
     Material m = materials[nonuniformEXT(in_material_index)];
 
@@ -142,10 +144,12 @@ void main() {
 
     reflectivity = mix(vec3(0.04), albedo, metallic);
 
+    error = false;
     vec3 outgoing_light = vec3(0);
     for (uint i = 0; i < directional_lights.length(); i++) {
         DirectionalLight light = directional_lights[i];
-        outgoing_light += calc_radiance(light.direction.xyz, light.color.rgb);
+        //light.direction = vec3(0, 0, 1);
+        outgoing_light += calc_radiance(-light.direction, light.color);
     }
 
     vec3 ambient = vec3(0.03) * albedo * ambient_occlusion;
@@ -156,4 +160,12 @@ void main() {
     color = pow(color, vec3(1.0/2.2));
 
     out_color = vec4(color, albedo_a.w);
+
+    //out_color.rgb = -normal;
+    //out_color.rgb = position;
+    //out_color.rgb = -position;
+    //out_color.rgb = -position - floor(-position);
+
+    if (error)
+        out_color = vec4(1, 0, 0, 1);
 }

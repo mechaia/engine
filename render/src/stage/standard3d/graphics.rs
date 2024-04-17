@@ -1,9 +1,10 @@
 use crate::{
+    resource::mesh::MeshSet,
     stage::renderpass::{RenderPassBuilder, RenderSubpassBuilder, SubpassAttachmentReferences},
     Render, VmaBuffer,
 };
 use ash::vk;
-use core::mem;
+use core::{mem, ptr::NonNull};
 use glam::{UVec2, Vec3};
 
 struct GraphicsSubpass {
@@ -21,12 +22,19 @@ struct GraphicsSubpassBuilder {
 }
 
 pub(super) struct Data {
-    /// Projected instance transforms + Draw parameters
+    /// Projected transforms
+    ///
+    /// - transforms (mat4)
+    ///
+    /// Set by compute shader, so device-local.
+    pub(super) data_transforms: VmaBuffer,
+    /// Instance data
     ///
     /// - instance data
     ///
-    /// Set by compute shader, so device-local.
-    pub(super) data: VmaBuffer,
+    /// Set by host.
+    pub(super) data_instances: VmaBuffer,
+    pub(super) data_instances_ptr: NonNull<InstanceData>,
     /// Draw parameters
     ///
     /// - parameters count
@@ -35,9 +43,56 @@ pub(super) struct Data {
     /// (currently) Set by host, so host-visible.
     pub(super) parameters: VmaBuffer,
     /// Pointer to mapped parameters.
-    pub(super) parameters_ptr: *mut u8,
+    pub(super) parameters_ptr: NonNull<u8>,
     /// - camera near/far (uniform)
     pub(super) descriptor_set: vk::DescriptorSet,
+}
+
+#[repr(C)]
+pub(super) struct InstanceData {
+    transforms_offset: u32,
+    material_index: u32,
+}
+
+impl Data {
+    pub unsafe fn set_instance_data(
+        &mut self,
+        meshes: &MeshSet,
+        instance_counts: &[u32],
+        instance_data: &mut dyn Iterator<Item = super::Instance>,
+    ) {
+        let count = instance_counts.iter().sum::<u32>();
+
+        let mut p = self.data_instances_ptr.as_ptr();
+        for d in instance_data.take(usize::try_from(count).unwrap()) {
+            p.write(InstanceData {
+                transforms_offset: d.transforms_offset,
+                material_index: d.material,
+            });
+            p = p.add(1);
+        }
+
+        let p = self.parameters_ptr.cast::<u32>().as_ptr();
+        p.write(instance_counts.iter().filter(|&&n| n > 0).count() as u32);
+
+        let mut p = p.add(1).cast::<vk::DrawIndexedIndirectCommand>();
+        let mut first_instance = 0;
+        for (i, &instance_count) in instance_counts.iter().enumerate() {
+            if instance_count == 0 {
+                continue;
+            }
+            let mesh = meshes.mesh(i);
+            p.write(vk::DrawIndexedIndirectCommand {
+                first_instance,
+                instance_count,
+                index_count: mesh.index_count,
+                first_index: mesh.index_offset,
+                vertex_offset: mesh.vertex_offset as i32,
+            });
+            first_instance += instance_count;
+            p = p.add(1);
+        }
+    }
 }
 
 pub unsafe fn push(
@@ -57,6 +112,11 @@ pub unsafe fn push(
                 .stage_flags(vk::ShaderStageFlags::VERTEX),
             vk::DescriptorSetLayoutBinding::builder()
                 .binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX),
+            vk::DescriptorSetLayoutBinding::builder()
+                .binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT),
@@ -185,14 +245,20 @@ unsafe impl RenderSubpassBuilder for GraphicsSubpassBuilder {
             f(0, vk::Format::R32G32B32_SFLOAT, 0),
             f(1, vk::Format::R32G32B32_SFLOAT, 0),
             f(2, vk::Format::R32G32_SFLOAT, 0),
-            // instance
-            f(3, vk::Format::R32_UINT, 12),
+            f(3, vk::Format::R16G16B16A16_UINT, 0),
             f(4, vk::Format::R32G32B32A32_SFLOAT, 0),
-            f(4, vk::Format::R32G32B32A32_SFLOAT, 16),
-            f(4, vk::Format::R32G32B32A32_SFLOAT, 32),
-            f(4, vk::Format::R32G32B32A32_SFLOAT, 48),
+            // instance
+            f(5, vk::Format::R32_UINT, 0),
+            f(5, vk::Format::R32_UINT, 4),
         ];
-        let binding_descrs = [f_v(0, 12), f_v(1, 12), f_v(2, 8), f_i(3, 32), f_i(4, 64)];
+        let binding_descrs = [
+            f_v(0, 12),
+            f_v(1, 12),
+            f_v(2, 8),
+            f_v(3, 8),
+            f_v(4, 16),
+            f_i(5, 8),
+        ];
 
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
             .vertex_attribute_descriptions(&attr_descrs)
@@ -314,15 +380,16 @@ unsafe impl crate::stage::renderpass::RenderSubpass for GraphicsSubpass {
                     sh.meshes.vertex_data.0,
                     sh.meshes.vertex_data.0,
                     sh.meshes.vertex_data.0,
-                    // FIXME lol, lmao
-                    data.compute.data.0,
-                    data.graphics.data.0,
+                    sh.meshes.vertex_data.0,
+                    sh.meshes.vertex_data.0,
+                    data.graphics.data_instances.0,
                 ],
                 &[
                     sh.meshes.positions_offset,
                     sh.meshes.normals_offset,
                     sh.meshes.uvs_offset,
-                    0,
+                    sh.meshes.joints_offset,
+                    sh.meshes.weights_offset,
                     0,
                 ],
             );

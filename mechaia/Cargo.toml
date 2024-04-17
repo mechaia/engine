@@ -5,9 +5,18 @@ edition = "2021"
 
 [dependencies]
 physics3d = { path = "../physics3d", package = "mechaia_physics3d" }
-render = { path = "../render", package = "mechaia_render" }
-window = { path = "../window", package = "mechaia_window" }
-gui = { path = "../gui", package = "mechaia_gui" }
+render = { path = "../render", package = "mechaia_render", optional = true }
+window = { path = "../window", package = "mechaia_window", optional = true }
+gui = { path = "../gui", package = "mechaia_gui", optional = true }
 sound = { path = "../sound", package = "mechaia_sound" }
 util = { path = "../util", package = "mechaia_util" }
+model = { path = "../model", package = "mechaia_model" }
+voxel_common = { path = "../voxel/common", package = "mechaia_voxel_common", optional = true }
+voxel_render = { path = "../voxel/render", package = "mechaia_voxel_render", optional = true }
 glam = "0.27.0"
+
+[features]
+default = ["render"]
+render = ["dep:render", "dep:gui", "dep:window"]
+voxel = ["dep:voxel_common"]
+voxel_render = ["dep:voxel_render"]

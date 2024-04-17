@@ -1,5 +1,6 @@
-use crate::{mesh::MeshCollection, VmaBuffer};
+use crate::{resource::mesh::MeshSet, VmaBuffer};
 use ash::vk;
+use core::ptr::NonNull;
 
 pub struct ComputeStage {
     pipeline: vk::Pipeline,
@@ -8,14 +9,14 @@ pub struct ComputeStage {
 }
 
 pub(super) struct Data {
-    /// Instance transforms + Dispatch parameters.
+    /// Instance transforms.
     ///
-    /// - instance data
+    /// - transform data
     ///
     /// Set by host, so host-visible.
     pub(super) data: VmaBuffer,
-    /// Pointer to mapped instance data.
-    pub(super) data_ptr: *mut u8,
+    /// Pointer to mapped transform data.
+    pub(super) data_ptr: NonNull<TransformData>,
     /// Dispatch parameters
     ///
     /// - parameters
@@ -23,7 +24,7 @@ pub(super) struct Data {
     /// Set by host, so host-visible.
     pub(super) parameters: VmaBuffer,
     /// Pointer to mapped parameters.
-    pub(super) parameters_ptr: *mut u8,
+    pub(super) parameters_ptr: NonNull<vk::DispatchIndirectCommand>,
     /// - camera mat4 (uniform)
     /// - compute_data (storage)
     /// - graphics_data (storage)
@@ -31,63 +32,36 @@ pub(super) struct Data {
 }
 
 #[repr(C)]
-struct InstanceData {
-    pos: [f32; 3],
-    material: u32,
+pub(super) struct TransformData {
     rot: [f32; 4],
+    pos: [f32; 3],
+    scale: f32,
 }
 
 impl Data {
-    pub unsafe fn set_instance_data(
+    pub unsafe fn set_transform_data(
         &mut self,
-        meshes: &MeshCollection,
-        instance_counts: &[u32],
-        instance_data: &mut dyn Iterator<Item = super::Instance>,
-        graphics: &mut super::graphics::Data,
+        meshes: &MeshSet,
+        transform_data: &mut dyn Iterator<Item = super::Transform>,
     ) {
-        let count = instance_counts.iter().sum::<u32>();
-
-        let mut p = self.data_ptr.cast::<InstanceData>();
-        for mut d in instance_data.take(count as usize) {
-            if d.rotation.w < 0.0 {
-                d.rotation = -d.rotation;
-            }
-            p.write(InstanceData {
-                pos: d.translation.to_array(),
-                material: d.material,
+        let mut p = self.data_ptr.as_ptr();
+        for d in transform_data {
+            p.write(TransformData {
                 rot: d.rotation.to_array(),
+                pos: d.translation.to_array(),
+                scale: d.scale,
             });
             p = p.add(1);
         }
 
+        let count = p.offset_from(self.data_ptr.as_ptr()).try_into().unwrap();
         self.parameters_ptr
-            .cast::<vk::DispatchIndirectCommand>()
+            .as_ptr()
             .write(vk::DispatchIndirectCommand {
                 x: count,
                 y: 1,
                 z: 1,
             });
-
-        let p = graphics.parameters_ptr.cast::<u32>();
-        p.write(instance_counts.iter().filter(|&&n| n > 0).count() as u32);
-
-        let mut p = p.add(1).cast::<vk::DrawIndexedIndirectCommand>();
-        let mut first_instance = 0;
-        for (i, &instance_count) in instance_counts.iter().enumerate() {
-            if instance_count == 0 {
-                continue;
-            }
-            let mesh = meshes.mesh(i);
-            p.write(vk::DrawIndexedIndirectCommand {
-                first_instance,
-                instance_count,
-                index_count: mesh.index_count,
-                first_index: mesh.index_offset,
-                vertex_offset: mesh.vertex_offset as i32,
-            });
-            first_instance += instance_count;
-            p = p.add(1);
-        }
     }
 }
 
@@ -108,21 +82,19 @@ pub unsafe fn new(shared: super::Shared, dev: &ash::Device) -> ComputeStage {
                 .binding(0)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .build(),
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
             vk::DescriptorSetLayoutBinding::builder()
                 .binding(1)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .build(),
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
             vk::DescriptorSetLayoutBinding::builder()
                 .binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .build(),
-        ];
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        ]
+        .map(|x| x.build());
         let info = vk::DescriptorSetLayoutCreateInfo::builder()
             .flags(vk::DescriptorSetLayoutCreateFlags::empty())
             .bindings(&bindings);
