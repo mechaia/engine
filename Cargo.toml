@@ -7,7 +7,7 @@ members = [
 	"game",
 	"util", "physics3d", "window",
 	"mechaia", "gui", "sound", "model",
-	"voxel/render", "voxel/common",
+	"voxel/render", "voxel/common", "input",
 ]
 
 [profile.dev.package."*"]

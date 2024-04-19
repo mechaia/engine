@@ -9,54 +9,32 @@ use winit::{
     window::WindowBuilder,
 };
 
+pub use winit::keyboard::SmolStr;
+
 pub struct Window {
     event_loop: EventLoop<()>,
     window: winit::window::Window,
     active_inputs: HashMap<InputKey, f32>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Event {
     Resized(UVec2),
     Input(Input),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Input {
     key: InputKey,
     value: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum InputKey {
-    A,
-    B,
-    C,
-    D,
-    E,
-    F,
-    G,
-    H,
-    I,
-    J,
-    K,
-    L,
-    M,
-    N,
-    O,
-    P,
-    Q,
-    R,
-    S,
-    T,
-    U,
-    V,
-    W,
-    X,
-    Y,
-    Z,
-    Enter,
-    Space,
+    /// Unicode character, case sensitive.
+    ///
+    /// Includes "enter" (`\n`), "tab" (`\t`) and "space" (` `)
+    Unicode(SmolStr),
     LShift,
     RShift,
     LCtrl,
@@ -72,7 +50,7 @@ pub enum InputKey {
     PrintScreen,
     PageUp,
     PageDown,
-    F12,
+    F(u8),
 }
 
 impl Window {
@@ -152,48 +130,34 @@ impl Window {
                         use InputKey::*;
                         let key = match event.logical_key {
                             Key::Named(n) => match (n, event.location) {
-                                (NamedKey::Space, _) => Space,
+                                (NamedKey::Space, _) => Unicode(SmolStr::new_inline(" ")),
+                                (NamedKey::Enter, _) => Unicode(SmolStr::new_inline("\n")),
+                                (NamedKey::Tab, _) => Unicode(SmolStr::new_inline("\t")),
                                 (NamedKey::Control, KeyLocation::Left) => LCtrl,
                                 (NamedKey::Control, KeyLocation::Right) => RCtrl,
                                 (NamedKey::Shift, KeyLocation::Left) => LShift,
                                 (NamedKey::Shift, KeyLocation::Right) => RShift,
                                 (NamedKey::Super, KeyLocation::Left) => LSuper,
                                 (NamedKey::Super, KeyLocation::Right) => RSuper,
-                                (NamedKey::Enter, _) => Enter,
                                 (NamedKey::PrintScreen, _) => PrintScreen,
                                 (NamedKey::PageUp, _) => PageUp,
                                 (NamedKey::PageDown, _) => PageDown,
-                                (NamedKey::F12, _) => F12,
+                                (NamedKey::F1, _) => F(1),
+                                (NamedKey::F2, _) => F(2),
+                                (NamedKey::F3, _) => F(3),
+                                (NamedKey::F4, _) => F(4),
+                                (NamedKey::F5, _) => F(5),
+                                (NamedKey::F6, _) => F(6),
+                                (NamedKey::F7, _) => F(7),
+                                (NamedKey::F8, _) => F(8),
+                                (NamedKey::F9, _) => F(9),
+                                (NamedKey::F10, _) => F(10),
+                                (NamedKey::F11, _) => F(11),
+                                (NamedKey::F12, _) => F(12),
                                 n => todo!("{:?}", n),
                             },
                             Key::Dead(_) => todo!(),
-                            Key::Character(chr) => match chr.as_str() {
-                                "a" | "A" => A,
-                                "b" | "B" => B,
-                                "c" | "C" => C,
-                                "d" | "D" => D,
-                                "e" | "E" => E,
-                                "f" | "F" => F,
-                                "g" | "G" => G,
-                                "h" | "H" => H,
-                                "i" | "I" => I,
-                                "j" | "J" => J,
-                                "k" | "K" => K,
-                                "l" | "L" => L,
-                                "m" | "M" => M,
-                                "n" | "N" => N,
-                                "o" | "O" => O,
-                                "p" | "P" => P,
-                                "q" | "Q" => Q,
-                                "r" | "R" => R,
-                                "s" | "S" => S,
-                                "t" | "T" => T,
-                                "u" | "U" => U,
-                                "v" | "V" => V,
-                                "w" | "W" => W,
-                                "z" | "Z" => Z,
-                                c => todo!("{:?}", c),
-                            },
+                            Key::Character(s) => Unicode(s),
                             Key::Unidentified(_) => todo!(),
                         };
                         let value = match event.state {
@@ -287,8 +251,8 @@ impl Window {
     }
 
     /// Get the value of an input.
-    pub fn input(&self, key: InputKey) -> f32 {
-        *self.active_inputs.get(&key).unwrap_or(&0.0)
+    pub fn input(&self, key: &InputKey) -> f32 {
+        *self.active_inputs.get(key).unwrap_or(&0.0)
     }
 
     /// Reset accumulated relative mouse movements, including wheel.
@@ -310,7 +274,7 @@ fn set_input(map: &mut HashMap<InputKey, f32>, key: InputKey, value: f32) -> Eve
     if value == 0.0 {
         map.remove(&key);
     } else {
-        map.insert(key, value);
+        map.insert(key.clone(), value);
     }
     Event::Input(Input { key, value })
 }

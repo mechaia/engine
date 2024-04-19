@@ -938,6 +938,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "mechaia_gui",
+ "mechaia_input",
  "mechaia_model",
  "mechaia_physics3d",
  "mechaia_render",
@@ -956,6 +957,13 @@ dependencies = [
  "glam",
  "mechaia_render",
  "vk-shader-macros",
+]
+
+[[package]]
+name = "mechaia_input"
+version = "0.1.0"
+dependencies = [
+ "mechaia_window",
 ]
 
 [[package]]

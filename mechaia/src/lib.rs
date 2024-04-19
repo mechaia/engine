@@ -11,3 +11,5 @@ pub mod voxel {
     #[cfg(feature = "voxel_render")]
     pub use voxel_render as render;
 }
+//#[cfg(feature = "dep:input")]
+pub use input;

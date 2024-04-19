@@ -13,10 +13,12 @@ util = { path = "../util", package = "mechaia_util" }
 model = { path = "../model", package = "mechaia_model" }
 voxel_common = { path = "../voxel/common", package = "mechaia_voxel_common", optional = true }
 voxel_render = { path = "../voxel/render", package = "mechaia_voxel_render", optional = true }
+input = { path = "../input", package = "mechaia_input", optional = true }
 glam = "0.27.0"
 
 [features]
-default = ["render"]
+default = ["client"]
+client = ["render", "dep:input"]
 render = ["dep:render", "dep:gui", "dep:window"]
 voxel = ["dep:voxel_common"]
 voxel_render = ["dep:voxel_render"]
