@@ -38,7 +38,6 @@ impl MonoPacker {
                 tiles.y += 1;
             }
         }
-        dbg!(tiles, tiles * dim);
         Self {
             tiles,
             tile_dim: dim,
@@ -267,6 +266,6 @@ mod test {
     #[test]
     fn spleen_5x8() {
         let s = include_str!("../../font/spleen/spleen-5x8.bdf");
-        parse_from_lines(&mut s.lines().map(|s| s.to_string()).map(|s| dbg!(s)));
+        parse_from_lines(&mut s.lines().map(|s| s.to_string()));
     }
 }

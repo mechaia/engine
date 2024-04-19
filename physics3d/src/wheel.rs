@@ -21,6 +21,7 @@ struct WheelInstance {
     rotation: f32,
     angle: f32,
     torque: f32,
+    brake: f32,
 }
 
 struct WheelSuspensionInstance {
@@ -62,6 +63,7 @@ impl VehicleBody {
             rotation: 0.0,
             angle: 0.0,
             torque: 0.0,
+            brake: 0.0,
         });
         WheelHandle(h)
     }
@@ -76,6 +78,10 @@ impl VehicleBody {
 
     pub fn set_wheel_torque(&mut self, wheel: WheelHandle, torque: f32) {
         self.wheels[wheel.0].torque = torque;
+    }
+
+    pub fn set_wheel_brake(&mut self, wheel: WheelHandle, brake: f32) {
+        self.wheels[wheel.0].brake = brake;
     }
 
     /// Returns transform for axle and tire.
@@ -182,7 +188,7 @@ impl VehicleBody {
                 let impulse = w.static_friction
                     * Vec3::new(
                         velocity_across_wheel,
-                        velocity_across_wheel + (force * dt),
+                        velocity_along_wheel * w.brake + (force * dt),
                         0.0,
                     );
 
