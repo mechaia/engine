@@ -1,6 +1,9 @@
+pub mod font;
+pub mod immediate;
+
 use ash::vk;
 use core::{ffi::CStr, mem};
-use glam::Vec2;
+use glam::{U16Vec2, Vec2, Vec4};
 use render::{
     resource::texture::TextureSet,
     stage::renderpass::{
@@ -10,7 +13,7 @@ use render::{
 };
 use std::{
     ptr::NonNull,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 const ENTRY_POINT: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
@@ -19,38 +22,72 @@ pub struct Gui {
     shared: Shared,
 }
 
+type Shared = Arc<Mutex<SharedData>>;
+
+pub struct Draw<'a> {
+    shared: MutexGuard<'a, SharedData>,
+    index: usize,
+    instance_data_ptr: *mut InstanceData,
+    instance_data_end: *mut InstanceData,
+}
+
 pub struct Instance {
-    pub position: Vec2,
-    pub half_extents: Vec2,
+    pub position: U16Vec2,
+    pub size: U16Vec2,
     pub rotation: f32,
     pub uv_start: Vec2,
     pub uv_end: Vec2,
     pub texture: u32,
+    pub color: Vec4,
 }
 
 impl Gui {
-    pub fn draw(&mut self, index: usize, instances: &mut dyn Iterator<Item = Instance>) {
-        let sh = self.shared.lock().unwrap();
-        let data = &sh.data[index];
+    pub fn draw<'a>(&'a mut self, index: usize) -> Draw<'a> {
+        let shared = self.shared.lock().unwrap();
+        let data = &shared.data[index];
         unsafe {
-            let mut p = data.instance_data_ptr.as_ptr();
-            for inst in instances.take(usize::try_from(sh.max_instances).unwrap()) {
-                p.write(InstanceData {
-                    half_extents: vec2_to_unorm16(inst.half_extents),
-                    rotation: rot_to_cossin(inst.rotation),
-                    position: vec2_to_snorm16(inst.position),
-                    uv_scale: vec2_to_snorm16(inst.uv_end - inst.uv_start),
-                    uv_offset: vec2_to_unorm16(inst.uv_start),
-                    texture_index: inst.texture,
-                    _padding: [0; 2],
-                });
-                p = p.add(1);
+            let ptr = data.instance_data_ptr.as_ptr();
+            Draw {
+                instance_data_ptr: ptr,
+                instance_data_end: ptr.add(usize::try_from(shared.max_instances).unwrap()),
+                shared,
+                index,
             }
+        }
+    }
+}
+
+impl<'a> Draw<'a> {
+    pub fn push(&mut self, instance: &Instance) {
+        assert!(
+            self.instance_data_ptr < self.instance_data_end,
+            "out of bounds"
+        );
+        unsafe {
+            self.instance_data_ptr.write(InstanceData {
+                position: instance.position,
+                size: instance.size,
+                rotation: instance.rotation,
+                uv_start: instance.uv_start,
+                uv_end: instance.uv_end,
+                texture_index: instance.texture,
+                color: instance.color,
+            });
+            self.instance_data_ptr = self.instance_data_ptr.add(1);
+        }
+    }
+}
+
+impl Drop for Draw<'_> {
+    fn drop(&mut self) {
+        let data = &self.shared.data[self.index];
+        unsafe {
             data.draw_parameters_ptr
                 .as_ptr()
                 .write(vk::DrawIndirectCommand {
                     vertex_count: 4,
-                    instance_count: p
+                    instance_count: self
+                        .instance_data_ptr
                         .offset_from(data.instance_data_ptr.as_ptr())
                         .try_into()
                         .unwrap(),
@@ -61,11 +98,10 @@ impl Gui {
     }
 }
 
-type Shared = Arc<Mutex<SharedData>>;
-
 struct SharedData {
     max_instances: u32,
     data: Box<[SubpassData]>,
+    viewport: U16Vec2,
 }
 
 struct Subpass {
@@ -89,13 +125,13 @@ struct SubpassBuilder {
 
 #[repr(C)]
 struct InstanceData {
-    half_extents: [u16; 2],
-    rotation: [i16; 2],
-    position: [i16; 2],
-    uv_scale: [i16; 2],
-    uv_offset: [u16; 2],
+    position: U16Vec2,
+    size: U16Vec2,
+    rotation: f32,
     texture_index: u32,
-    _padding: [u32; 2],
+    uv_start: Vec2,
+    uv_end: Vec2,
+    color: Vec4,
 }
 
 #[must_use]
@@ -109,6 +145,7 @@ pub fn push(
         let shared = Arc::new(Mutex::new(SharedData {
             data: [].into(),
             max_instances,
+            viewport: U16Vec2::ZERO,
         }));
 
         let subpass = render_pass.push(
@@ -147,63 +184,6 @@ unsafe impl RenderSubpassBuilder for SubpassBuilder {
         render_pass: vk::RenderPass,
         subpass: u32,
     ) -> Box<dyn render::stage::renderpass::RenderSubpass> {
-        /*
-        let set_layout = {
-            let bindings = [vk::DescriptorSetLayoutBinding::builder()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT)]
-            .map(|x| x.build());
-            let info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
-            dev.create_descriptor_set_layout(&info, None).unwrap()
-        };
-
-        let pool = {
-            let sizes = [vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::INPUT_ATTACHMENT,
-                // FIXME this depends on swapchain, whose exact framebuffer count depends on mode too
-                descriptor_count: 3,
-            }];
-            let info = vk::DescriptorPoolCreateInfo::builder()
-                .max_sets(1)
-                .pool_sizes(&sizes);
-            dev.create_descriptor_pool(&info, None).unwrap()
-        };
-
-        // FIXME this depends on swapchain, whose exact framebuffer count depends on mode too
-        let sets = {
-            let layouts = vec![set_layout; 3];
-            let info = vk::DescriptorSetAllocateInfo::builder()
-                .descriptor_pool(pool)
-                .set_layouts(&layouts);
-            dev.allocate_descriptor_sets(&info).unwrap()
-        };
-        */
-
-        /*
-        let data = sets
-            .into_iter()
-            .map(|set| {
-                let info = [vk::DescriptorImageInfo {
-                    sampler,
-                    i
-                }];
-                dev.update_descriptor_sets(
-                    &[vk::WriteDescriptorSet::builder()
-                        .dst_set(set)
-                        .dst_binding(0)
-                        .dst_array_element(0)
-                        .descriptor_type(vk::DescriptorType::INPUT_ATTACHMENT)
-                        .image_info(info)]
-                    .map(|x| x.build()),
-                    &[],
-                );
-                SubpassData { set }
-            })
-            .collect();
-        */
-
         let vertex_shader = make_shader(
             dev,
             vk_shader_macros::include_glsl!("shader/quad.glsl.vert", kind: vert),
@@ -226,24 +206,29 @@ unsafe impl RenderSubpassBuilder for SubpassBuilder {
         .map(|x| x.build());
 
         let attr_descrs = {
-            let f = |location, offset: u32, format| vk::VertexInputAttributeDescription {
-                location,
-                binding: 0,
-                format,
-                offset: offset * 4,
+            let mut loc = 0;
+            let mut f = |offset: u32, format| {
+                loc += 1;
+                vk::VertexInputAttributeDescription {
+                    location: loc - 1,
+                    binding: 0,
+                    format,
+                    offset: offset * 4,
+                }
             };
             [
-                f(0, 0, vk::Format::R16G16_UNORM),
-                f(1, 1, vk::Format::R16G16_SNORM),
-                f(2, 2, vk::Format::R16G16_SNORM),
-                f(3, 3, vk::Format::R16G16_SNORM),
-                f(4, 4, vk::Format::R16G16_UNORM),
-                f(5, 5, vk::Format::R32_UINT),
+                f(0, vk::Format::R16G16_USCALED),
+                f(1, vk::Format::R16G16_USCALED),
+                f(2, vk::Format::R32_SFLOAT),
+                f(3, vk::Format::R32_UINT),
+                f(4, vk::Format::R32G32_SFLOAT),
+                f(6, vk::Format::R32G32_SFLOAT),
+                f(8, vk::Format::R32G32B32A32_SFLOAT),
             ]
         };
         let binding_descrs = [vk::VertexInputBindingDescription {
             binding: 0,
-            stride: 8 * 4,
+            stride: 12 * 4,
             input_rate: vk::VertexInputRate::INSTANCE,
         }];
 
@@ -425,6 +410,10 @@ unsafe impl RenderSubpass for Subpass {
         }
 
         sh.data = data.into();
+
+        let ext = swapchain.extent();
+        sh.viewport.x = ext.width.try_into().unwrap();
+        sh.viewport.y = ext.height.try_into().unwrap();
     }
 }
 

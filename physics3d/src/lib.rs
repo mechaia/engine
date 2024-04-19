@@ -284,7 +284,12 @@ impl Physics {
         );
     }
 
-    pub fn cast_ray(&self, start: Vec3, length: Vec3, ignore_body: Option<RigidBodyHandle>) -> Option<CastRayResult> {
+    pub fn cast_ray(
+        &self,
+        start: Vec3,
+        length: Vec3,
+        ignore_body: Option<RigidBodyHandle>,
+    ) -> Option<CastRayResult> {
         let max_toi = length.length();
         let ray = Ray {
             origin: glam_to_point(start),

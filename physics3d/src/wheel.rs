@@ -115,7 +115,11 @@ impl VehicleBody {
             let start = trf.apply_to_translation(w.transform.translation);
             let dir = trf.apply_to_direction(w.transform.rotation * Vec3::NEG_Z);
 
-            let ray = physics.cast_ray(start, dir * (w.radius + w.suspension.max_length), Some(body));
+            let ray = physics.cast_ray(
+                start,
+                dir * (w.radius + w.suspension.max_length),
+                Some(body),
+            );
             v.push(WheelNow {
                 pos: start,
                 dir,
@@ -135,7 +139,8 @@ impl VehicleBody {
                 let point = n.pos + n.dir * res.distance;
 
                 // spring
-                let force = (w.suspension.max_length - w.suspension.cur_length) * w.suspension.force_per_distance;
+                let force = (w.suspension.max_length - w.suspension.cur_length)
+                    * w.suspension.force_per_distance;
 
                 // damp
                 let velocity_at_point = physics.velocity_at_world_point(body, point);
@@ -174,12 +179,12 @@ impl VehicleBody {
                 // FIXME account for mass when applying friction
                 // Also requires accounting for friction applied by other wheels
                 let force = w.torque * w.radius;
-                dbg!(w.torque, w.transform.translation.x);
-                let impulse = w.static_friction * Vec3::new(
-                    velocity_across_wheel,
-                    velocity_across_wheel + (force * dt),
-                    0.0
-                );
+                let impulse = w.static_friction
+                    * Vec3::new(
+                        velocity_across_wheel,
+                        velocity_across_wheel + (force * dt),
+                        0.0,
+                    );
 
                 physics.apply_impulse_at(body, point, trf.apply_to_direction(-impulse));
 
