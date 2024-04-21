@@ -69,8 +69,6 @@ float metallic;
 
 vec3 reflectivity;
 
-bool error;
-
 float DistributionGGX(vec3 N, vec3 H) {
     float a      = roughness*roughness;
     float a2     = a*a;
@@ -80,8 +78,6 @@ float DistributionGGX(vec3 N, vec3 H) {
     float num   = a2;
     float denom = (NdotH2 * (a2 - 1.0) + 1.0);
     denom = PI * (denom * denom);
-    if (denom < 0.0)
-        error = true;
 	
     return num / denom;
 }
@@ -110,8 +106,6 @@ float GeometrySmith(vec3 ray) {
 // Should be good for performance too :)
 vec3 calc_radiance(vec3 ray, vec3 light_color) {
     vec3 halfway_normal = normalize(ray + view_normal);
-
-    error = error || length(ray + view_normal) < 1e-3;
 
     // cook-torrance brdf
     float normal_distribution = DistributionGGX(normal, halfway_normal);
@@ -144,7 +138,6 @@ void main() {
 
     reflectivity = mix(vec3(0.04), albedo, metallic);
 
-    error = false;
     vec3 outgoing_light = vec3(0);
     for (uint i = 0; i < directional_lights.length(); i++) {
         DirectionalLight light = directional_lights[i];
@@ -165,7 +158,4 @@ void main() {
     //out_color.rgb = position;
     //out_color.rgb = -position;
     //out_color.rgb = -position - floor(-position);
-
-    if (error)
-        out_color = vec4(1, 0, 0, 1);
 }

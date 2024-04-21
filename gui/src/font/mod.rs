@@ -31,6 +31,10 @@ impl FontMap {
         self.dim.into()
     }
 
+    pub fn line_height(&self) -> u16 {
+        self.line_height
+    }
+
     pub fn copy_into(&self, b: &mut [u8]) {
         assert_eq!(
             b.len(),

@@ -142,21 +142,33 @@ fn str_to_key(key: &str) -> Option<Key> {
     use window::InputKey::*;
     Some(if key.starts_with(":") {
         match &*key[1..].to_lowercase() {
+            ":" | "!" | "+" | "-" | "%" | "/" | "*" => Unicode(SmolStr::new_inline(&key[1..])),
             "space" => Unicode(SmolStr::new_inline(" ")),
             "enter" => Unicode(SmolStr::new_inline("\n")),
             "tab" => Unicode(SmolStr::new_inline("\t")),
+            "alt" => Alt,
+            "altgr" => AltGr,
             "lctrl" => LCtrl,
             "rctrl" => RCtrl,
             "lshift" => LShift,
             "rshift" => RShift,
+            "lsuper" => LSuper,
+            "rsuper" => RSuper,
             "mouserelativex" => MouseRelativeX,
             "mouserelativey" => MouseRelativeY,
             "mousewheely" => MouseWheelY,
             "mousebuttonl" => MouseButtonL,
             "mousebuttonm" => MouseButtonM,
             "mousebuttonr" => MouseButtonR,
+            "esc" => Esc,
+            "arrowup" => ArrowUp,
+            "arrowdown" => ArrowDown,
+            "arrowleft" => ArrowLeft,
+            "arrowright" => ArrowRight,
             _ => return None,
         }
+    } else if "!+-/%*".contains(key.chars().next().unwrap()) {
+        return None;
     } else {
         Unicode(SmolStr::new(key))
     })
@@ -186,7 +198,9 @@ mod test {
             input.c   C   -1 1  2 5
             input.d   LCtrl   -0.333 0.7   3.1415 13.37
         ";
-        let map = InputMap::parse_from_lines_graceful(text.lines(), &mut |i, e| { dbg!(i, e); });
+        let map = InputMap::parse_from_lines_graceful(text.lines(), &mut |i, e| {
+            dbg!(i, e);
+        });
         dbg!(&map);
         // FIXME validate you lazy cunt
         //todo!();

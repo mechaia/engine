@@ -19,14 +19,15 @@ pub struct Window {
 
 #[derive(Clone, Debug)]
 pub enum Event {
-    Resized(UVec2),
     Input(Input),
+    Resized(UVec2),
+    CloseRequested,
 }
 
 #[derive(Clone, Debug)]
 pub struct Input {
-    key: InputKey,
-    value: f32,
+    pub key: InputKey,
+    pub value: f32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -41,6 +42,8 @@ pub enum InputKey {
     RCtrl,
     LSuper,
     RSuper,
+    Alt,
+    AltGr,
     MouseRelativeX,
     MouseRelativeY,
     MouseButtonL,
@@ -50,6 +53,12 @@ pub enum InputKey {
     PrintScreen,
     PageUp,
     PageDown,
+    Esc,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    Backspace,
     F(u8),
 }
 
@@ -119,7 +128,7 @@ impl Window {
                         device_id,
                         position,
                     } => {}
-                    WindowEvent::CloseRequested => todo!(),
+                    WindowEvent::CloseRequested => events.push(Event::CloseRequested),
                     WindowEvent::SmartMagnify { device_id } => todo!(),
                     WindowEvent::ThemeChanged(_) => todo!(),
                     WindowEvent::KeyboardInput {
@@ -139,6 +148,8 @@ impl Window {
                                 (NamedKey::Shift, KeyLocation::Right) => RShift,
                                 (NamedKey::Super, KeyLocation::Left) => LSuper,
                                 (NamedKey::Super, KeyLocation::Right) => RSuper,
+                                (NamedKey::Alt, _) => Alt,
+                                (NamedKey::AltGraph, _) => AltGr,
                                 (NamedKey::PrintScreen, _) => PrintScreen,
                                 (NamedKey::PageUp, _) => PageUp,
                                 (NamedKey::PageDown, _) => PageDown,
@@ -154,6 +165,33 @@ impl Window {
                                 (NamedKey::F10, _) => F(10),
                                 (NamedKey::F11, _) => F(11),
                                 (NamedKey::F12, _) => F(12),
+                                (NamedKey::F13, _) => F(13),
+                                (NamedKey::F14, _) => F(14),
+                                (NamedKey::F15, _) => F(15),
+                                (NamedKey::F16, _) => F(16),
+                                (NamedKey::F17, _) => F(17),
+                                (NamedKey::F18, _) => F(18),
+                                (NamedKey::F19, _) => F(19),
+                                (NamedKey::F20, _) => F(20),
+                                (NamedKey::F21, _) => F(21),
+                                (NamedKey::F22, _) => F(22),
+                                (NamedKey::F23, _) => F(23),
+                                (NamedKey::F24, _) => F(24),
+                                (NamedKey::F25, _) => F(25),
+                                (NamedKey::F26, _) => F(26),
+                                (NamedKey::F27, _) => F(27),
+                                (NamedKey::F28, _) => F(28),
+                                (NamedKey::F29, _) => F(29),
+                                (NamedKey::F30, _) => F(30),
+                                (NamedKey::F31, _) => F(31),
+                                (NamedKey::F32, _) => F(32),
+                                (NamedKey::F33, _) => F(33),
+                                (NamedKey::Escape, _) => Esc,
+                                (NamedKey::ArrowUp, _) => ArrowUp,
+                                (NamedKey::ArrowDown, _) => ArrowDown,
+                                (NamedKey::ArrowLeft, _) => ArrowLeft,
+                                (NamedKey::ArrowRight, _) => ArrowRight,
+                                (NamedKey::Backspace, _) => Backspace,
                                 n => todo!("{:?}", n),
                             },
                             Key::Dead(_) => todo!(),

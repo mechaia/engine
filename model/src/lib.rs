@@ -7,6 +7,8 @@ pub struct Collection {
     pub meshes: Vec<Mesh>,
     pub armatures: Vec<Armature>,
     pub models: Vec<Model>,
+    /// List of scenes, all starting from a single root node.
+    pub scenes: Vec<Node>,
 }
 
 pub struct Mesh {
@@ -25,6 +27,68 @@ pub struct Armature {
     /// "Inverse" transform, from parent bone space to model space
     bone_parent_to_model: Box<[Transform]>,
     output_count: u16,
+}
+
+pub enum Node {
+    /// Parent of one or more nodes.
+    Parent {
+        children: Box<[(Transform, Node)]>,
+        properties: Properties,
+    },
+    /// Leaf node, with index to model.
+    Leaf {
+        model: usize,
+        properties: Properties,
+    },
+}
+
+impl Node {
+    pub fn properties(&self) -> &Properties {
+        match self {
+            Self::Parent { properties, .. } => properties,
+            Self::Leaf { properties, .. } => properties,
+        }
+    }
+
+    pub fn descendants(&self) -> impl Iterator<Item = &Node> + '_ {
+        struct Iter<'a> {
+            stack: Vec<&'a [(Transform, Node)]>,
+        }
+        impl<'a> Iterator for Iter<'a> {
+            type Item = &'a Node;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                let (n, l) = loop {
+                    let l = self.stack.pop()?;
+                    let Some((n, l)) = l.split_first() else {
+                        continue;
+                    };
+                    break (n, l);
+                };
+                self.stack.push(l);
+                match &n.1 {
+                    Node::Parent { children, .. } => self.stack.push(&**children),
+                    Node::Leaf { .. } => {}
+                }
+                Some(&n.1)
+            }
+        }
+        let stack = match self {
+            Self::Parent { children, .. } => Vec::from([&**children]),
+            Self::Leaf { .. } => Vec::new(),
+        };
+        Iter { stack }
+    }
+}
+
+#[derive(Default)]
+pub struct Properties {
+    pub name: Option<Box<str>>,
+    pub custom: Box<[(Box<str>, CustomValue)]>,
+}
+
+pub enum CustomValue {
+    Str(Box<str>),
 }
 
 impl Armature {
@@ -112,7 +176,6 @@ impl Armature {
 pub struct Model {
     pub mesh_index: usize,
     pub armature_index: usize,
-    pub name: Option<Box<str>>,
 }
 
 #[repr(align(16))]
@@ -123,6 +186,11 @@ pub struct Transform {
 }
 
 impl Transform {
+    const IDENTITY: Self = Self {
+        rotation: Quat::IDENTITY,
+        translation: Vec3A::ZERO,
+    };
+
     fn apply_as_child(&self, child: &Self) -> Self {
         let translation = (self.rotation * child.translation) + self.translation;
         let rotation = self.rotation * child.rotation;
@@ -137,5 +205,9 @@ impl Transform {
             rotation: self.rotation.inverse(),
             translation: -self.translation,
         }
+    }
+
+    fn is_identity(&self) -> bool {
+        self.translation == Vec3A::ONE && self.rotation == Quat::IDENTITY
     }
 }

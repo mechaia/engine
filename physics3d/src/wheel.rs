@@ -1,6 +1,5 @@
+use crate::{CastRayNormalResult, Physics, RigidBodyHandle, Transform};
 use glam::{Quat, Vec3};
-
-use crate::{CastRayResult, Physics, RigidBodyHandle, Transform};
 
 /// Collection of wheels on a single body.
 ///
@@ -37,7 +36,7 @@ struct WheelSuspensionInstance {
 struct WheelNow {
     pos: Vec3,
     dir: Vec3,
-    ray: Option<CastRayResult>,
+    ray: Option<CastRayNormalResult>,
     len: f32,
 }
 
@@ -121,7 +120,7 @@ impl VehicleBody {
             let start = trf.apply_to_translation(w.transform.translation);
             let dir = trf.apply_to_direction(w.transform.rotation * Vec3::NEG_Z);
 
-            let ray = physics.cast_ray(
+            let ray = physics.cast_ray_normal(
                 start,
                 dir * (w.radius + w.suspension.max_length),
                 Some(body),
@@ -163,6 +162,11 @@ impl VehicleBody {
         let trf = physics.rigid_body_transform(body);
         let dt = physics.time_delta();
 
+        let mass = physics.rigid_body_mass(body);
+        // FIXME funky shit going on here
+        //let mass_per_wheel = mass / now.iter().filter(|r| r.ray.is_some()).count() as f32;
+        let mass_per_wheel = mass / self.wheels.len() as f32;
+
         for (w, n) in self.wheels.values_mut().zip(now) {
             let Some(res) = n.ray else { continue };
             if res.distance <= n.len {
@@ -177,26 +181,40 @@ impl VehicleBody {
                 let vehicle_along = trf.apply_to_direction(Vec3::Y);
                 let vehicle_across = trf.apply_to_direction(Vec3::X);
 
+                // FIXME I think this is correct, but I need pen and paper to work this out properly
+                // FIXME probable cause of NaN errors
+                let vehicle_across_surface = vehicle_along.cross(res.normal).normalize();
+
                 let velocity_at_point = physics.velocity_at_world_point(body, point);
 
                 let velocity_along_wheel = vehicle_along.dot(velocity_at_point);
                 let velocity_across_wheel = vehicle_across.dot(velocity_at_point);
 
+                let velocity_across_wheel_surface = vehicle_across_surface.dot(velocity_at_point);
+
                 // FIXME account for mass when applying friction
                 // Also requires accounting for friction applied by other wheels
                 let force = w.torque * w.radius;
-                let impulse = w.static_friction
+                let mut impulse = w.static_friction
+                    * mass_per_wheel
                     * Vec3::new(
-                        velocity_across_wheel,
-                        velocity_along_wheel * w.brake + (force * dt),
+                        //velocity_across_wheel,
+                        velocity_across_wheel_surface,
+                        velocity_along_wheel * w.brake,
                         0.0,
                     );
+                impulse.y += force * dt;
 
                 physics.apply_impulse_at(body, point, trf.apply_to_direction(-impulse));
 
+                // FIXME account for gravity
+                // and other forces
                 let velocity_at_point = physics.velocity_at_world_point(body, point);
                 let velocity_along_wheel = vehicle_along.dot(velocity_at_point);
                 let angular_velocity = velocity_along_wheel / w.radius;
+                if angular_velocity.is_nan() {
+                    dbg!(vehicle_along, velocity_at_point, w.radius, point);
+                }
                 w.rotation -= angular_velocity * dt;
             }
         }

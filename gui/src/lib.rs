@@ -71,7 +71,7 @@ impl<'a> Draw<'a> {
                 uv_start: instance.uv_start,
                 uv_end: instance.uv_end,
                 texture_index: instance.texture,
-                color: instance.color,
+                color: instance.color.to_array(),
             });
             self.instance_data_ptr = self.instance_data_ptr.add(1);
         }
@@ -131,7 +131,7 @@ struct InstanceData {
     texture_index: u32,
     uv_start: Vec2,
     uv_end: Vec2,
-    color: Vec4,
+    color: [f32; 4],
 }
 
 #[must_use]

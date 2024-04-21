@@ -76,6 +76,13 @@ pub struct CastRayResult {
     pub user_data: u32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CastRayNormalResult {
+    pub distance: f32,
+    pub normal: Vec3,
+    pub user_data: u32,
+}
+
 impl Physics {
     pub fn new() -> Self {
         Self {
@@ -172,6 +179,32 @@ impl Physics {
         self.insert_shape(SharedShape::halfspace(glam_to_unit_vector(normal)))
     }
 
+    pub fn make_convex_hull_shape(&mut self, points: &[Vec3]) -> ShapeHandle {
+        let points = points.iter().map(|v| glam_to_point(*v)).collect::<Vec<_>>();
+        self.insert_shape(SharedShape::convex_hull(&points).expect("failed to make convex mesh"))
+    }
+
+    /// FIXME appears to be broken?
+    pub fn make_convex_mesh_indexed_shape(
+        &mut self,
+        points: &[Vec3],
+        indices: &[u32],
+    ) -> ShapeHandle {
+        assert_eq!(indices.len() % 3, 0, "indices must be a multiple of 3");
+        let indices = unsafe {
+            let len = indices.len();
+            let ptr = indices.as_ptr();
+            core::slice::from_raw_parts(ptr.cast::<[u32; 3]>(), len / 3)
+        };
+
+        let mut points = points.iter().map(|v| glam_to_point(*v)).collect::<Vec<_>>();
+        points.shrink_to_fit();
+
+        self.insert_shape(
+            SharedShape::convex_mesh(points, indices).expect("failed to make convex mesh"),
+        )
+    }
+
     pub fn make_compound_shape(&mut self, shapes: &[(Transform, ShapeHandle)]) -> ShapeHandle {
         assert!(!shapes.is_empty());
         let mut nshapes = Vec::with_capacity(shapes.len());
@@ -226,6 +259,13 @@ impl Physics {
 
     pub fn rigid_body_mass(&self, body: RigidBodyHandle) -> f32 {
         self.rigid_body_set[body.0].mass()
+    }
+
+    pub fn rigid_body_center_of_mass(&self, body: RigidBodyHandle) -> Vec3 {
+        let body = &self.rigid_body_set[body.0];
+        let world_com = body.center_of_mass();
+        let world_transform = body.position();
+        point_to_glam(world_transform.inverse_transform_point(world_com))
     }
 
     pub fn set_rigid_body_properties(
@@ -321,6 +361,44 @@ impl Physics {
             })
     }
 
+    pub fn cast_ray_normal(
+        &self,
+        start: Vec3,
+        length: Vec3,
+        ignore_body: Option<RigidBodyHandle>,
+    ) -> Option<CastRayNormalResult> {
+        let max_toi = length.length();
+        let ray = Ray {
+            origin: glam_to_point(start),
+            // from docs:
+            //   max_toi: the maximum time-of-impact that can be reported by this cast.
+            //   This effectively limits the length of the ray to ray.dir.norm() * max_toi. Use Real::MAX for an unbounded ray.
+            // safe to assume we don't need to normalize the direction
+            dir: glam_to_vector(length.normalize()),
+        };
+        let filter = QueryFilter {
+            flags: QueryFilterFlags::empty(),
+            groups: None,
+            exclude_collider: None,
+            exclude_rigid_body: ignore_body.map(|h| h.0),
+            predicate: None,
+        };
+        self.query_pipeline
+            .cast_ray_and_get_normal(
+                &self.rigid_body_set,
+                &self.collider_set,
+                &ray,
+                max_toi,
+                true,
+                filter,
+            )
+            .map(|(collider, res)| CastRayNormalResult {
+                distance: res.toi,
+                normal: vector_to_glam(res.normal),
+                user_data: self.collider_set[collider].user_data as u32,
+            })
+    }
+
     pub fn velocity_at_world_point(&self, body: RigidBodyHandle, point: Vec3) -> Vec3 {
         vector_to_glam(self.rigid_body_set[body.0].velocity_at_point(&glam_to_point(point)))
     }
@@ -361,6 +439,10 @@ fn translation_to_glam(v: Translation<f32>) -> Vec3 {
     vector_to_glam(v.vector)
 }
 
+fn point_to_glam(v: Point<f32>) -> Vec3 {
+    vector_to_glam(v.coords)
+}
+
 fn rotation_to_glam(v: Unit<Quaternion<f32>>) -> Quat {
     Quat::from_xyzw(v.i, v.j, v.k, v.w)
 }
@@ -373,6 +455,11 @@ fn isometry_to_transform(iso: Isometry<f32>) -> Transform {
 }
 
 impl Transform {
+    pub const IDENTITY: Self = Self {
+        translation: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+    };
+
     pub fn apply_to_translation(&self, translation: Vec3) -> Vec3 {
         self.translation + (self.rotation * translation)
     }
@@ -389,6 +476,13 @@ impl Transform {
         Self {
             translation: self.translation + self.rotation * transform.translation,
             rotation: self.rotation * transform.rotation,
+        }
+    }
+
+    pub fn interpolate(&self, to: &Self, s: f32) -> Self {
+        Self {
+            translation: self.translation.lerp(to.translation, s),
+            rotation: self.rotation.slerp(to.rotation, s),
         }
     }
 }

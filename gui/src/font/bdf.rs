@@ -8,6 +8,7 @@ use std::{borrow::Cow, collections::HashMap};
 
 pub const SPLEEN_32X64: &str = include_str!("../../font/spleen/spleen-32x64.bdf");
 pub const SPLEEN_16X32: &str = include_str!("../../font/spleen/spleen-16x32.bdf");
+pub const SPLEEN_8X16: &str = include_str!("../../font/spleen/spleen-8x16.bdf");
 
 struct BoundingBox {
     dim: U16Vec2,

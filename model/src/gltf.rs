@@ -24,6 +24,9 @@ pub fn from_glb_slice(data: &[u8]) -> crate::Collection {
     let gltf = ::gltf::Gltf::from_slice(&glb.json).unwrap();
     let bin = glb.bin.as_deref().unwrap();
 
+    dbg!(&glb.json);
+    dbg!(&gltf);
+
     let mut builder = Builder {
         gltf: &gltf,
         bin,
@@ -33,19 +36,58 @@ pub fn from_glb_slice(data: &[u8]) -> crate::Collection {
         armature_map: Default::default(),
     };
 
-    // I fucking hate gltf
-    for node in gltf.nodes() {
-        builder.add_model(node);
-    }
-    /*
     for scene in gltf.scenes() {
-        for root in scene.nodes() {
-            builder.add_model(root);
-        }
+        let nodes = scene
+            .nodes()
+            .map(|n| parse_node_tree(&mut builder, n))
+            .collect::<Vec<_>>();
+        assert!(!nodes.is_empty(), "scene with no nodes");
+        let node = if nodes.len() == 1 && nodes[0].0.is_identity() {
+            nodes.into_iter().next().unwrap().1
+        } else {
+            crate::Node::Parent {
+                children: nodes.into(),
+                properties: Default::default(),
+            }
+        };
+        builder.collection.scenes.push(node);
     }
-    */
 
     builder.collection
+}
+
+fn parse_node_tree(builder: &mut Builder<'_>, node: ::gltf::Node<'_>) -> (Transform, crate::Node) {
+    let model = builder.make_model(&node);
+    let mut children = node
+        .children()
+        .map(|node| parse_node_tree(builder, node))
+        .collect::<Vec<_>>();
+
+    dbg!(node.extras());
+    let mut properties = crate::Properties::default();
+    properties.name = node.name().map(|s| s.into());
+
+    let snode = if children.is_empty() {
+        crate::Node::Leaf {
+            model: model.unwrap_or(usize::MAX),
+            properties,
+        }
+    } else {
+        if let Some(model) = model {
+            children.push((
+                Transform::IDENTITY,
+                crate::Node::Leaf {
+                    model,
+                    properties: Default::default(),
+                },
+            ));
+        }
+        crate::Node::Parent {
+            children: children.into(),
+            properties,
+        }
+    };
+    (to_transform(node.transform()), snode)
 }
 
 /// Load all nodes so we have proper fucking backlinks
@@ -80,15 +122,20 @@ fn load_nodes(gltf: &::gltf::Gltf) -> Vec<Node> {
 }
 
 impl Builder<'_> {
-    fn add_model(&mut self, node: ::gltf::Node<'_>) {
+    fn make_model(&mut self, node: &::gltf::Node<'_>) -> Option<usize> {
         let mesh_index = node.mesh().map_or(usize::MAX, |m| self.load_mesh(m));
         let armature_index = node.skin().map_or(usize::MAX, |m| self.load_armature(m));
-        let name = node.name().map(|s| s.into());
+
+        if mesh_index == usize::MAX && armature_index == usize::MAX {
+            return None;
+        }
+
+        let i = self.collection.models.len();
         self.collection.models.push(crate::Model {
             mesh_index,
             armature_index,
-            name,
         });
+        Some(i)
     }
 
     fn load_mesh(&mut self, mesh: ::gltf::Mesh<'_>) -> usize {
