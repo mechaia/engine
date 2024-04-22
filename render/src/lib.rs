@@ -237,20 +237,32 @@ fn select_device(instance: &ash::Instance) -> (vk::PhysicalDevice, vk::PhysicalD
     let phys_devs = unsafe { instance.enumerate_physical_devices().unwrap() };
     let mut chosen = None;
     let force_cpu = env_true("MECHAIA_RENDER_FORCE_CPU");
+    let mut prio = 0;
     for p in phys_devs {
         let properties = unsafe { instance.get_physical_device_properties(p) };
-        if properties.device_type == vk::PhysicalDeviceType::CPU {
-            if force_cpu || chosen.is_none() {
+        match properties.device_type {
+            vk::PhysicalDeviceType::DISCRETE_GPU if prio < 5 => {
                 chosen = Some((p, properties));
+                prio = 5;
             }
-            if force_cpu {
-                break;
+            vk::PhysicalDeviceType::INTEGRATED_GPU if prio < 4 => {
+                chosen = Some((p, properties));
+                prio = 4;
             }
-        } else if properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
-            chosen = Some((p, properties));
-        } else if chosen.is_none() {
-            // Select any, even if something like llvmpipe
-            chosen = Some((p, properties));
+            vk::PhysicalDeviceType::VIRTUAL_GPU if prio < 3 => {
+                chosen = Some((p, properties));
+                prio = 3;
+            }
+            vk::PhysicalDeviceType::CPU if prio < 2 || force_cpu => {
+                chosen = Some((p, properties));
+                prio = 2 + u8::from(force_cpu) * 100;
+            }
+            vk::PhysicalDeviceType::OTHER if prio < 1 => {
+                chosen = Some((p, properties));
+                prio = 1;
+            }
+            // skip
+            _ => {}
         }
     }
     chosen.unwrap()

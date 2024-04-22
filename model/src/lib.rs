@@ -11,10 +11,24 @@ pub struct Collection {
     pub scenes: Vec<Node>,
 }
 
+pub struct Model {
+    pub mesh_index: usize,
+    pub armature_index: usize,
+}
+
+#[repr(align(16))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Transform {
+    pub rotation: Quat,
+    pub translation: Vec3A,
+}
+
 pub struct Mesh {
     pub indices: Vec<u32>,
     /// translation, normal, uv, joints, weights
     pub vertices: util::soa::Vec5<Vec3, Vec3, Vec2, [u16; 4], [f32; 4]>,
+    /// How many transforms to push to render correctly.
+    pub transform_count: u16,
 }
 
 pub struct Armature {
@@ -24,8 +38,8 @@ pub struct Armature {
     /// - child count
     /// - output index: Mapping of bone to "joint", for use by vertices
     bones: util::soa::Vec3<Transform, u16, u16>,
-    /// "Inverse" transform, from parent bone space to model space
-    bone_parent_to_model: Box<[Transform]>,
+    /// "Inverse" transform, from model space to local bone space
+    model_to_local_bone: Box<[Transform]>,
     output_count: u16,
 }
 
@@ -92,12 +106,13 @@ pub enum CustomValue {
 }
 
 impl Armature {
+    /// Transform, child count, output
     fn new(bones: util::soa::Vec3<Transform, u16, u16>) -> Self {
         Self {
-            bone_parent_to_model: [].into(),
+            model_to_local_bone: [].into(),
             output_count: bones
                 .iter()
-                .filter(|e| *e.1 != u16::MAX)
+                .filter(|e| *e.2 != u16::MAX)
                 .count()
                 .try_into()
                 .unwrap(),
@@ -107,29 +122,57 @@ impl Armature {
     }
 
     fn calc_inv_transforms(mut self) -> Self {
-        debug_assert!(self.bone_parent_to_model.is_empty());
-        let transforms = (0..self.bones.len())
-            .map(|_| Transform::default())
-            .collect::<Vec<_>>();
+        debug_assert!(self.model_to_local_bone.is_empty());
 
-        let mut out = (0..self.output_count)
+        self.model_to_local_bone = (0..self.output_count)
             .map(|_| Transform::default())
             .collect::<Box<_>>();
 
         let mut index = 0;
         while index < self.bones.len() {
-            self.apply_rec(&transforms[index], &transforms, &mut index, &mut out);
+            self.calc_inv_transforms_rec(&Transform::IDENTITY, &mut index);
         }
 
-        for o in out.iter_mut() {
-            *o = o.inverse();
+        dbg!(&self.model_to_local_bone);
+
+        #[cfg(debug_assertions)]
+        {
+            let trfs = (0..self.output_count)
+                .map(|_| Transform::IDENTITY)
+                .collect::<Vec<_>>();
+            let out = self.apply(&Transform::IDENTITY, &trfs, true);
+            for t in out.into_vec() {
+                assert!(t.translation.x.abs() < 1e-6);
+                assert!(t.translation.y.abs() < 1e-6);
+                assert!(t.translation.z.abs() < 1e-6);
+                assert!(t.rotation.x.abs() < 1e-6);
+                assert!(t.rotation.y.abs() < 1e-6);
+                assert!(t.rotation.z.abs() < 1e-6);
+                assert!((t.rotation.w - 1.0).abs() < 1e-6);
+            }
         }
 
-        self.bone_parent_to_model = out;
         self
     }
 
-    pub fn apply(&self, transforms: &[Transform]) -> Box<[Transform]> {
+    fn calc_inv_transforms_rec(&mut self, parent_trf: &Transform, index: &mut usize) {
+        let (trf, &child_count, &output) = self.bones.get(*index).unwrap();
+        *index += 1;
+
+        let trf = parent_trf.apply_to_transform(trf);
+
+        if output != u16::MAX {
+            self.model_to_local_bone[usize::from(output)] = trf.inverse();
+            //self.model_to_local_bone[usize::from(output)] = trf;
+        }
+
+        let end = *index + usize::from(child_count);
+        while *index < end {
+            self.calc_inv_transforms_rec(&trf, index);
+        }
+    }
+
+    pub fn apply(&self, base_transform: &Transform, transforms: &[Transform], inverse: bool) -> Box<[Transform]> {
         assert_eq!(transforms.len(), self.bones.len());
 
         let mut out = (0..self.output_count)
@@ -138,11 +181,7 @@ impl Armature {
 
         let mut index = 0;
         while index < self.bones.len() {
-            self.apply_rec(&transforms[index], transforms, &mut index, &mut out);
-        }
-
-        for (i, o) in out.iter_mut().enumerate() {
-            *o = self.apply_direct(i, o);
+            self.apply_rec(base_transform, &mut index, transforms, &mut out, inverse);
         }
 
         out.into()
@@ -150,49 +189,44 @@ impl Armature {
 
     fn apply_rec(
         &self,
-        cur: &Transform,
-        transforms: &[Transform],
+        parent_trf: &Transform,
         index: &mut usize,
+        transforms: &[Transform],
         out: &mut [Transform],
+        inverse: bool,
     ) {
         let (trf, &child_count, &output) = self.bones.get(*index).unwrap();
+        let trf = parent_trf.apply_to_transform(&trf);
+        let trf = trf.apply_to_transform(&transforms[usize::from(*index)]);
+        *index += 1;
 
         if output != u16::MAX {
-            out[usize::from(output)] = self.apply_direct(usize::from(output), cur);
+            out[usize::from(output)] = if inverse {
+                self.apply_direct(usize::from(output), &trf)
+            } else {
+                trf
+            };
         }
+
         let end = *index + usize::from(child_count);
         while *index < end {
-            let cur = cur.apply_as_child(&transforms[*index]);
-            self.apply_rec(&cur, transforms, index, out);
+            self.apply_rec(&trf, index, transforms, out, inverse);
         }
     }
 
     pub fn apply_direct(&self, index: usize, transform: &Transform) -> Transform {
-        transform.apply_as_child(&self.bone_parent_to_model[index])
+        transform.apply_to_transform(&self.model_to_local_bone[index])
     }
 }
 
-#[derive(Debug)]
-pub struct Model {
-    pub mesh_index: usize,
-    pub armature_index: usize,
-}
-
-#[repr(align(16))]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Transform {
-    pub rotation: Quat,
-    pub translation: Vec3A,
-}
-
 impl Transform {
-    const IDENTITY: Self = Self {
+    pub const IDENTITY: Self = Self {
         rotation: Quat::IDENTITY,
         translation: Vec3A::ZERO,
     };
 
-    fn apply_as_child(&self, child: &Self) -> Self {
-        let translation = (self.rotation * child.translation) + self.translation;
+    fn apply_to_transform(&self, child: &Self) -> Self {
+        let translation = self.translation + (self.rotation * child.translation);
         let rotation = self.rotation * child.rotation;
         Self {
             rotation,
@@ -201,13 +235,48 @@ impl Transform {
     }
 
     fn inverse(&self) -> Self {
+        let rotation = self.rotation.inverse();
+        let translation = rotation * -self.translation;
         Self {
-            rotation: self.rotation.inverse(),
-            translation: -self.translation,
+            rotation,
+            translation,
         }
     }
 
     fn is_identity(&self) -> bool {
         self.translation == Vec3A::ONE && self.rotation == Quat::IDENTITY
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn transform_invert_transform() {
+        let trf = Transform {
+            translation: Vec3A::new(5.0, 4.0, 3.0),
+            rotation: Quat::from_axis_angle(Vec3::new(1.0, 3.0, 2.0).normalize(), 1.0),
+        };
+        let trf2 = trf.inverse().apply_to_transform(&trf);
+        assert_eq!(trf2.translation, Vec3A::ZERO);
+        assert_eq!(trf2.rotation, Quat::IDENTITY);
+    }
+
+    #[test]
+    fn transform_invert_translate() {
+        let trf = Transform {
+            translation: Vec3A::new(5.0, 4.0, 3.0),
+            rotation: Quat::from_axis_angle(Vec3::new(1.0, 3.0, 2.0).normalize(), 1.0),
+        };
+        let trf_inv = trf.inverse();
+
+        let p = Vec3A::new(1.0, 2.0, 3.0);
+        let q = trf.translation + (trf.rotation * p);
+        let pp = trf_inv.translation + (trf_inv.rotation * q);
+
+        assert!((p.x - pp.x).abs() < 1e-6);
+        assert!((p.y - pp.y).abs() < 1e-6);
+        assert!((p.z - pp.z).abs() < 1e-6);
     }
 }

@@ -24,9 +24,6 @@ pub fn from_glb_slice(data: &[u8]) -> crate::Collection {
     let gltf = ::gltf::Gltf::from_slice(&glb.json).unwrap();
     let bin = glb.bin.as_deref().unwrap();
 
-    dbg!(&glb.json);
-    dbg!(&gltf);
-
     let mut builder = Builder {
         gltf: &gltf,
         bin,
@@ -63,7 +60,6 @@ fn parse_node_tree(builder: &mut Builder<'_>, node: ::gltf::Node<'_>) -> (Transf
         .map(|node| parse_node_tree(builder, node))
         .collect::<Vec<_>>();
 
-    dbg!(node.extras());
     let mut properties = crate::Properties::default();
     properties.name = node.name().map(|s| s.into());
 
@@ -179,9 +175,22 @@ impl Builder<'_> {
                     .chain(iter::repeat([1.0, 0.0, 0.0, 0.0])),
             )
             .map(|((((a, b), c), d), e)| (a, b, c, d, e))
-            .collect();
+            .collect::<util::soa::Vec5<_, _, _, _, _>>();
 
-        let m = crate::Mesh { indices, vertices };
+        let transform_count = *vertices
+            .as_slices()
+            .3
+            .iter()
+            .flat_map(|v| v)
+            .max()
+            .unwrap_or(&0)
+            + 1;
+
+        let m = crate::Mesh {
+            indices,
+            vertices,
+            transform_count,
+        };
 
         let len = m.vertices.len();
         assert!(m
@@ -199,6 +208,10 @@ impl Builder<'_> {
         if let Some(i) = self.armature_map.get(&skin.index()) {
             return *i;
         }
+
+        let r = skin.reader(source_bin(self.bin));
+        dbg!(r.read_inverse_bind_matrices().unwrap().map(|m| glam::Mat4::from_cols_array_2d(&m)).map(|m| m.to_scale_rotation_translation())
+            .collect::<Vec<_>>());
 
         let armature = build_armature(self.gltf, &skin, &self.nodes);
 
@@ -218,11 +231,7 @@ impl Builder<'_> {
             .map(|((a, b), c)| (a, b, c))
             .collect();
 
-        let armature = crate::Armature {
-            bones,
-            bone_parent_to_model: [].into(),
-            output_count: armature.joint_index_to_bone.len().try_into().unwrap(),
-        };
+        let armature = crate::Armature::new(bones);
 
         let i = self.collection.armatures.len();
         self.collection.armatures.push(armature);
@@ -302,7 +311,7 @@ fn collect_bones(armature: &mut Armature, nodes: &[Node], node: ::gltf::Node<'_>
         collect_bones(armature, nodes, n);
     }
     let end = armature.descendant_count.len();
-    armature.descendant_count[start] = u16::try_from(end - start).unwrap();
+    armature.descendant_count[start] = u16::try_from(end - start - 1).unwrap();
 
     if let Some(i) = armature.joints.iter().position(|n| *n == node.index()) {
         armature.joint_index_to_bone[i] = start;
@@ -328,7 +337,7 @@ fn source_bin<'a>(bin: &'a [u8]) -> impl Fn(::gltf::Buffer<'_>) -> Option<&'a [u
 
 fn to_transform(transform: ::gltf::scene::Transform) -> Transform {
     let (translation, rotation, scale) = transform.decomposed();
-    //assert_eq!(scale, [1.0; 3], "non-identity scale");
+    assert!(scale.iter().all(|v| (v - 1.0).abs() < 1e-6), "non-identity scale {scale:?}");
     Transform {
         rotation: Quat::from_array(rotation),
         translation: Vec3A::from_array(translation),

@@ -464,6 +464,10 @@ impl Transform {
         self.translation + (self.rotation * translation)
     }
 
+    pub fn apply_to_translation_inv(&self, translation: Vec3) -> Vec3 {
+        self.rotation.inverse() * (translation - self.translation)
+    }
+
     pub fn apply_to_direction(&self, direction: Vec3) -> Vec3 {
         self.rotation * direction
     }
