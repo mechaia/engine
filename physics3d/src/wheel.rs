@@ -151,7 +151,7 @@ impl VehicleBody {
                 let velocity_at_point = physics.velocity_at_world_point(body, point);
                 let velocity_along_suspension = -n.dir.dot(velocity_at_point);
                 let damp = w.suspension.damp_per_velocity * velocity_along_suspension;
-                let force = force - damp;
+                let force = (force - damp).max(0.0);
 
                 physics.apply_impulse_at(body, point, -(force * dt) * n.dir);
             }
