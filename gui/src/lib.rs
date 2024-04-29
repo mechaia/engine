@@ -5,7 +5,7 @@ use ash::vk;
 use core::{ffi::CStr, mem};
 use glam::{U16Vec2, Vec2, Vec4};
 use render::{
-    resource::texture::TextureSet,
+    resource::{texture::TextureView, Shared},
     stage::renderpass::{
         RenderPassBuilder, RenderSubpass, RenderSubpassBuilder, SubpassAttachmentReferences,
     },
@@ -19,12 +19,16 @@ use std::{
 const ENTRY_POINT: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"main\0") };
 
 pub struct Gui {
-    shared: Shared,
+    shared: Data,
 }
 
-type Shared = Arc<Mutex<SharedData>>;
+pub struct Configuration {
+    pub max_instances: u32,
+    pub max_textures: u32,
+}
 
 pub struct Draw<'a> {
+    viewport: U16Vec2,
     shared: MutexGuard<'a, SharedData>,
     index: usize,
     instance_data_ptr: *mut InstanceData,
@@ -41,6 +45,48 @@ pub struct Instance {
     pub color: Vec4,
 }
 
+type Data = Arc<Mutex<SharedData>>;
+
+struct SharedData {
+    max_instances: u32,
+    data: Box<[SubpassData]>,
+    viewport: U16Vec2,
+    max_textures: u32,
+    textures: util::Arena<Shared<TextureView>>,
+}
+
+struct Subpass {
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    shared: Data,
+    descriptor_set_layout: vk::DescriptorSetLayout,
+    pool: vk::DescriptorPool,
+}
+
+struct SubpassData {
+    instance_data: render::VmaBuffer,
+    instance_data_ptr: NonNull<InstanceData>,
+    draw_parameters: render::VmaBuffer,
+    draw_parameters_ptr: NonNull<vk::DrawIndirectCommand>,
+    set: vk::DescriptorSet,
+}
+
+struct SubpassBuilder {
+    shared: Data,
+    max_textures: u32,
+}
+
+#[repr(C)]
+struct InstanceData {
+    position: U16Vec2,
+    size: U16Vec2,
+    rotation: f32,
+    texture_index: u32,
+    uv_start: Vec2,
+    uv_end: Vec2,
+    color: [f32; 4],
+}
+
 impl Gui {
     pub fn draw<'a>(&'a mut self, index: usize) -> Draw<'a> {
         let shared = self.shared.lock().unwrap();
@@ -48,6 +94,7 @@ impl Gui {
         unsafe {
             let ptr = data.instance_data_ptr.as_ptr();
             Draw {
+                viewport: shared.viewport,
                 instance_data_ptr: ptr,
                 instance_data_end: ptr.add(usize::try_from(shared.max_instances).unwrap()),
                 shared,
@@ -55,9 +102,40 @@ impl Gui {
             }
         }
     }
+
+    pub fn add_texture(&mut self, render: &mut Render, texture: Shared<TextureView>) {
+        let sampler = render.dev_mut().nearest_sampler();
+        let infos = [texture.bind_info(sampler)];
+
+        let mut shared = self.shared.lock().unwrap();
+        let h = shared.textures.insert(texture);
+        assert!(h.as_u32() < shared.max_textures);
+
+        let writes = shared
+            .data
+            .iter()
+            .map(|d| {
+                vk::WriteDescriptorSet::builder()
+                    .dst_set(d.set)
+                    .dst_binding(0)
+                    .dst_array_element(h.as_u32())
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&infos)
+            })
+            .map(|w| w.build())
+            .collect::<Vec<_>>();
+
+        dbg!(h.as_u32(), writes.len());
+
+        unsafe { render.dev_mut().update_descriptor_sets(&writes, &[]) };
+    }
 }
 
 impl<'a> Draw<'a> {
+    pub fn viewport(&self) -> U16Vec2 {
+        self.viewport
+    }
+
     pub fn push(&mut self, instance: &Instance) {
         assert!(
             self.instance_data_ptr < self.instance_data_end,
@@ -82,15 +160,16 @@ impl Drop for Draw<'_> {
     fn drop(&mut self) {
         let data = &self.shared.data[self.index];
         unsafe {
+            let instance_count = self
+                .instance_data_ptr
+                .offset_from(data.instance_data_ptr.as_ptr())
+                .try_into()
+                .unwrap();
             data.draw_parameters_ptr
                 .as_ptr()
                 .write(vk::DrawIndirectCommand {
                     vertex_count: 4,
-                    instance_count: self
-                        .instance_data_ptr
-                        .offset_from(data.instance_data_ptr.as_ptr())
-                        .try_into()
-                        .unwrap(),
+                    instance_count,
                     first_vertex: 0,
                     first_instance: 0,
                 });
@@ -98,60 +177,25 @@ impl Drop for Draw<'_> {
     }
 }
 
-struct SharedData {
-    max_instances: u32,
-    data: Box<[SubpassData]>,
-    viewport: U16Vec2,
-}
-
-struct Subpass {
-    pipeline: vk::Pipeline,
-    layout: vk::PipelineLayout,
-    shared: Shared,
-    texture_set: TextureSet,
-}
-
-struct SubpassData {
-    instance_data: render::VmaBuffer,
-    instance_data_ptr: NonNull<InstanceData>,
-    draw_parameters: render::VmaBuffer,
-    draw_parameters_ptr: NonNull<vk::DrawIndirectCommand>,
-}
-
-struct SubpassBuilder {
-    shared: Shared,
-    texture_set: TextureSet,
-}
-
-#[repr(C)]
-struct InstanceData {
-    position: U16Vec2,
-    size: U16Vec2,
-    rotation: f32,
-    texture_index: u32,
-    uv_start: Vec2,
-    uv_end: Vec2,
-    color: [f32; 4],
-}
-
 #[must_use]
 pub fn push(
     render: &mut Render,
     render_pass: &mut RenderPassBuilder,
-    max_instances: u32,
-    texture_set: TextureSet,
+    config: &Configuration,
 ) -> Gui {
     unsafe {
         let shared = Arc::new(Mutex::new(SharedData {
             data: [].into(),
-            max_instances,
+            max_instances: config.max_instances,
             viewport: U16Vec2::ZERO,
+            textures: Default::default(),
+            max_textures: config.max_textures,
         }));
 
         let subpass = render_pass.push(
             SubpassBuilder {
                 shared: shared.clone(),
-                texture_set,
+                max_textures: config.max_textures,
             },
             SubpassAttachmentReferences {
                 color: Box::new([vk::AttachmentReference {
@@ -180,7 +224,7 @@ pub fn push(
 unsafe impl RenderSubpassBuilder for SubpassBuilder {
     unsafe fn build(
         self: Box<Self>,
-        dev: &ash::Device,
+        dev: &render::Dev,
         render_pass: vk::RenderPass,
         subpass: u32,
     ) -> Box<dyn render::stage::renderpass::RenderSubpass> {
@@ -276,8 +320,19 @@ unsafe impl RenderSubpassBuilder for SubpassBuilder {
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
+        let descriptor_set_layout = {
+            let bindings = [vk::DescriptorSetLayoutBinding::builder()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(self.max_textures)
+                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+                .build()];
+            let info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
+            dev.create_descriptor_set_layout(&info, None).unwrap()
+        };
+
         let layout = {
-            let layouts = [self.texture_set.layout()];
+            let layouts = [descriptor_set_layout];
             let push_constant_ranges = [vk::PushConstantRange {
                 stage_flags: vk::ShaderStageFlags::VERTEX,
                 offset: 0,
@@ -310,17 +365,20 @@ unsafe impl RenderSubpassBuilder for SubpassBuilder {
         dev.destroy_shader_module(fragment_shader, None);
         dev.destroy_shader_module(vertex_shader, None);
 
+        let pool = make_descriptor_pool(dev, self.max_textures, 5 /* FIXME */);
+
         Box::new(Subpass {
             pipeline,
             layout,
             shared: self.shared,
-            texture_set: self.texture_set,
+            descriptor_set_layout,
+            pool,
         })
     }
 }
 
 unsafe impl RenderSubpass for Subpass {
-    unsafe fn record_commands(&self, dev: &ash::Device, args: &render::StageArgs) {
+    unsafe fn record_commands(&self, dev: &render::Dev, args: &render::StageArgs) {
         let sh = self.shared.lock().unwrap();
         let data = &sh.data[args.index];
 
@@ -330,7 +388,7 @@ unsafe impl RenderSubpass for Subpass {
             vk::PipelineBindPoint::GRAPHICS,
             self.layout,
             0,
-            &[self.texture_set.set()],
+            &[data.set],
             &[],
         );
         let viewports = [vk::Viewport {
@@ -362,7 +420,6 @@ unsafe impl RenderSubpass for Subpass {
             1,
             mem::size_of::<vk::DrawIndirectCommand>() as u32,
         );
-        //dev.cmd_draw(args.cmd, 4, 1, 0, 0);
     }
 
     unsafe fn rebuild_swapchain(&mut self, dev: &mut render::Dev, swapchain: &render::SwapChain) {
@@ -371,6 +428,18 @@ unsafe impl RenderSubpass for Subpass {
 
         let new_len = swapchain.image_count();
         if new_len > data.len() {
+            let mut sets = {
+                let layouts = (data.len()..new_len)
+                    .map(|_| self.descriptor_set_layout)
+                    .collect::<Vec<_>>();
+                let info = vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(self.pool)
+                    .set_layouts(&layouts);
+                dev.allocate_descriptor_sets(&info).unwrap()
+            };
+
+            let old_len = data.len();
+
             data.resize_with(new_len, || {
                 let mut instance_data = dev.allocate_buffer(
                     4 * 8 * u64::from(sh.max_instances),
@@ -392,20 +461,45 @@ unsafe impl RenderSubpass for Subpass {
                     first_vertex: 0,
                     first_instance: 0,
                 });
+
                 SubpassData {
                     instance_data,
                     instance_data_ptr,
                     draw_parameters,
                     draw_parameters_ptr,
+                    set: sets.pop().unwrap(),
                 }
             });
+
+            let sampler = dev.nearest_sampler();
+            let infos = sh
+                .textures
+                .values()
+                .map(|t| [t.bind_info(sampler)])
+                .collect::<Vec<_>>();
+            let writes = data[old_len..]
+                .iter()
+                .flat_map(|d| {
+                    sh.textures
+                        .keys()
+                        .zip(&infos)
+                        .map(|(h, infos)| {
+                            vk::WriteDescriptorSet::builder()
+                                .dst_set(d.set)
+                                .dst_binding(0)
+                                .dst_array_element(h.as_u32())
+                                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                                .image_info(infos)
+                        })
+                        .map(|w| w.build())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+
+            unsafe { dev.update_descriptor_sets(&writes, &[]) };
         } else {
             while data.len() > new_len {
-                let d = data.pop().unwrap();
-                unsafe {
-                    dev.free_buffer(d.instance_data);
-                    dev.free_buffer(d.draw_parameters);
-                }
+                data.pop().unwrap().drop_with(dev, self.pool);
             }
         }
 
@@ -417,30 +511,34 @@ unsafe impl RenderSubpass for Subpass {
     }
 }
 
-unsafe fn make_shader(dev: &ash::Device, code: &[u32]) -> vk::ShaderModule {
+impl SubpassData {
+    fn drop_with(mut self, dev: &mut render::Dev, pool: vk::DescriptorPool) {
+        unsafe {
+            dev.free_descriptor_sets(pool, &[self.set]).unwrap();
+            dev.unmap_buffer(&mut self.instance_data);
+            dev.free_buffer(self.instance_data);
+            dev.unmap_buffer(&mut self.draw_parameters);
+            dev.free_buffer(self.draw_parameters);
+        }
+    }
+}
+
+fn make_descriptor_pool(
+    dev: &render::Dev,
+    max_texture_count: u32,
+    image_count: u32,
+) -> vk::DescriptorPool {
+    let sizes = [vk::DescriptorPoolSize {
+        ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        descriptor_count: image_count * max_texture_count,
+    }];
+    let info = vk::DescriptorPoolCreateInfo::builder()
+        .pool_sizes(&sizes)
+        .max_sets(image_count);
+    unsafe { dev.create_descriptor_pool(&info, None).unwrap() }
+}
+
+fn make_shader(dev: &render::Dev, code: &[u32]) -> vk::ShaderModule {
     let info = vk::ShaderModuleCreateInfo::builder().code(code);
-    dev.create_shader_module(&info, None).unwrap()
-}
-
-fn rot_to_cossin(rot: f32) -> [i16; 2] {
-    let (s, c) = rot.sin_cos();
-    [f32_to_snorm16(s), f32_to_snorm16(c)]
-}
-
-fn f32_to_unorm16(x: f32) -> u16 {
-    debug_assert!((0.0..=1.0).contains(&x), "0 <= {x} <= 1");
-    (x * f32::from(u16::MAX)) as u16
-}
-
-fn f32_to_snorm16(x: f32) -> i16 {
-    debug_assert!((-1.0..=1.0).contains(&x), "-1 <= {x} <= 1");
-    (x * f32::from(i16::MAX)) as i16
-}
-
-fn vec2_to_unorm16(v: Vec2) -> [u16; 2] {
-    [f32_to_unorm16(v.x), f32_to_unorm16(v.y)]
-}
-
-fn vec2_to_snorm16(v: Vec2) -> [i16; 2] {
-    [f32_to_snorm16(v.x), f32_to_snorm16(v.y)]
+    unsafe { dev.create_shader_module(&info, None).unwrap() }
 }

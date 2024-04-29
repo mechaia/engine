@@ -2,8 +2,6 @@ pub mod resource;
 pub mod stage;
 
 mod command;
-mod descriptor;
-mod material;
 mod queues;
 mod swapchain;
 
@@ -16,6 +14,38 @@ use std::{backtrace::Backtrace, ptr::NonNull};
 use vk_mem::{Alloc, AllocatorCreateInfo};
 
 const TIMEOUT: u64 = 100_000_000;
+
+pub unsafe trait DropWith {
+    unsafe fn drop_with(self, dev: &Dev);
+}
+
+pub struct Dev {
+    dev: ash::Device,
+    alloc: vk_mem::Allocator,
+    samplers: ImageSamplers,
+}
+
+pub struct Render {
+    dev: Dev,
+    entry: ash::Entry,
+    instance: ash::Instance,
+    debug_utils: ash::extensions::ext::DebugUtils,
+    utils_messenger: vk::DebugUtilsMessengerEXT,
+    physical_device: vk::PhysicalDevice,
+    surface_loader: ash::extensions::khr::Surface,
+    surface: vk::SurfaceKHR,
+    surface_format: vk::SurfaceFormatKHR,
+    swapchain: swapchain::SwapChain,
+    swapchain_draw: swapchain::Draw,
+    commands: command::Commands,
+    command_buffers: Box<[vk::CommandBuffer]>,
+    stages: util::Arena<Box<[Box<dyn Stage>]>>,
+}
+
+struct ImageSamplers {
+    nearest: vk::Sampler,
+    linear: vk::Sampler,
+}
 
 pub type VmaBuffer = (vk::Buffer, vk_mem::Allocation);
 type VmaImage = (vk::Image, vk_mem::Allocation);
@@ -49,11 +79,6 @@ unsafe extern "system" fn vulkan_debug_utils_callback(
 
 fn env_true(var: &str) -> bool {
     std::env::var(var).is_ok_and(|v| !["", "0"].contains(&&*v))
-}
-
-pub struct Dev {
-    dev: ash::Device,
-    alloc: vk_mem::Allocator,
 }
 
 impl Dev {
@@ -102,6 +127,10 @@ impl Dev {
     pub unsafe fn free_buffer(&mut self, mut buffer: VmaBuffer) {
         self.alloc.destroy_buffer(buffer.0, &mut buffer.1);
     }
+
+    pub fn nearest_sampler(&self) -> vk::Sampler {
+        self.samplers.nearest
+    }
 }
 
 impl Deref for Dev {
@@ -109,40 +138,6 @@ impl Deref for Dev {
 
     fn deref(&self) -> &Self::Target {
         &self.dev
-    }
-}
-
-pub unsafe trait DropWith {
-    unsafe fn drop_with(self, dev: &Dev);
-}
-
-pub struct Render {
-    dev: Dev,
-    entry: ash::Entry,
-    instance: ash::Instance,
-    debug_utils: ash::extensions::ext::DebugUtils,
-    utils_messenger: vk::DebugUtilsMessengerEXT,
-    physical_device: vk::PhysicalDevice,
-    surface_loader: ash::extensions::khr::Surface,
-    surface: vk::SurfaceKHR,
-    surface_format: vk::SurfaceFormatKHR,
-    swapchain: swapchain::SwapChain,
-    swapchain_draw: swapchain::Draw,
-    commands: command::Commands,
-    command_buffers: Box<[vk::CommandBuffer]>,
-    stages: util::Arena<Box<[Box<dyn Stage>]>>,
-}
-
-impl Render {
-    fn make_descriptor_pool(
-        &mut self,
-        sets: u32,
-        sizes: &[vk::DescriptorPoolSize],
-    ) -> vk::DescriptorPool {
-        let info = vk::DescriptorPoolCreateInfo::builder()
-            .max_sets(sets)
-            .pool_sizes(sizes);
-        unsafe { self.dev.create_descriptor_pool(&info, None).unwrap() }
     }
 }
 
@@ -230,6 +225,12 @@ impl Render {
             self.record_commands();
         }
     }
+
+    pub fn rerecord_commands(&mut self, stage_set: StageSetHandle) {
+        unsafe {
+            self.record_commands();
+        }
+    }
 }
 
 fn select_device(instance: &ash::Instance) -> (vk::PhysicalDevice, vk::PhysicalDeviceProperties) {
@@ -270,6 +271,7 @@ fn select_device(instance: &ash::Instance) -> (vk::PhysicalDevice, vk::PhysicalD
 
 impl Render {
     unsafe fn record_commands(&self) {
+        assert!(self.stages.len() <= 1, "COME THE FUCK ON DUDE");
         assert_eq!(self.stages.len(), 1, "COME THE FUCK ON DUDE");
 
         for stage in self.stages.values() {
@@ -433,10 +435,34 @@ fn init(
         dev.allocate_command_buffers(&info).unwrap().into()
     };
 
+    let make_sampler = |filter| unsafe {
+        let info = vk::SamplerCreateInfo::builder()
+            .mag_filter(filter)
+            .min_filter(filter)
+            .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .mip_lod_bias(0.0)
+            .anisotropy_enable(false)
+            .compare_enable(false)
+            .unnormalized_coordinates(false);
+        dev.create_sampler(&info, None).unwrap()
+    };
+
+    let samplers = ImageSamplers {
+        nearest: make_sampler(vk::Filter::NEAREST),
+        linear: make_sampler(vk::Filter::LINEAR),
+    };
+
     // Done
     Render {
         entry,
-        dev: Dev { dev, alloc },
+        dev: Dev {
+            dev,
+            alloc,
+            samplers,
+        },
         instance,
         debug_utils,
         utils_messenger,
@@ -506,6 +532,10 @@ impl Render {
                     self.commands.queues.graphics
                 });
         }
+    }
+
+    pub fn dev_mut(&mut self) -> &mut Dev {
+        &mut self.dev
     }
 }
 

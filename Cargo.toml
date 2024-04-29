@@ -4,7 +4,6 @@ members = [
 	"render",
 	"vehicle",
 	"terrain",
-	"game",
 	"util", "physics3d", "window",
 	"mechaia", "gui", "sound", "model",
 	"voxel/render", "voxel/common", "input",

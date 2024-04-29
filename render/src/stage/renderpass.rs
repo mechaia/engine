@@ -1,11 +1,11 @@
 use super::{Stage, StageArgs};
 use crate::{Dev, VmaImage};
-use ash::vk;
+use ash::vk::{self, AttachmentReference};
 use core::mem;
 use vk_mem::Alloc;
 
 pub unsafe trait RenderSubpass {
-    unsafe fn record_commands(&self, dev: &ash::Device, args: &StageArgs);
+    unsafe fn record_commands(&self, dev: &crate::Dev, args: &StageArgs);
 
     unsafe fn rebuild_swapchain(&mut self, dev: &mut Dev, swapchain: &crate::swapchain::SwapChain);
 }
@@ -13,7 +13,7 @@ pub unsafe trait RenderSubpass {
 pub unsafe trait RenderSubpassBuilder {
     unsafe fn build(
         self: Box<Self>,
-        dev: &ash::Device,
+        dev: &crate::Dev,
         render_pass: vk::RenderPass,
         subpass: u32,
     ) -> Box<dyn RenderSubpass>;
@@ -151,7 +151,7 @@ impl RenderPassBuilder {
 }
 
 unsafe impl Stage for RenderPass {
-    unsafe fn record_commands(&self, dev: &ash::Device, args: &StageArgs) {
+    unsafe fn record_commands(&self, dev: &crate::Dev, args: &StageArgs) {
         let fb = &self.framebuffers[args.index];
         let info = vk::RenderPassBeginInfo::builder()
             .render_pass(self.render_pass)

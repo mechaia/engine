@@ -1,11 +1,11 @@
 #version 450
 
-//#define LOCAL_SIZE_X 1
-
-layout(local_size_x = 1 << 0, local_size_y = 1, local_size_z = 1) in;
+//layout(local_size_x_id = 1, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
 layout (binding = 0) uniform Camera {
 	mat4 world_to_view;
+	mat4 view_to_projection;
 };
 
 struct Transform {
@@ -14,12 +14,12 @@ struct Transform {
 	float scale;
 };
 
-layout(std430, binding = 1) readonly buffer Transforms {
-	Transform transforms[];
+layout(std430, binding = 1) readonly buffer In {
+	Transform in_transforms[];
 };
 
 layout(std430, binding = 2) writeonly buffer Out {
-	mat4 projections[];
+	mat4 out_transforms[];
 };
 
 mat3 quat_to_axes(vec4 r) {
@@ -41,7 +41,7 @@ mat3 quat_to_axes(vec4 r) {
 
 void main() {
 	uint index = gl_GlobalInvocationID.x;
-	Transform trf = transforms[index];
+	Transform trf = in_transforms[index];
 
 	//vec4 rotation = vec4(inst.rotation, sqrt(max(0, 1 - dot(inst.rotation, inst.rotation))));
 	vec4 rotation = trf.rotation;
@@ -49,7 +49,7 @@ void main() {
 	// copied from https://docs.rs/glam/0.27.0/src/glam/f32/sse2/mat4.rs.html#215-223
 	mat3 axes = quat_to_axes(rotation);
 
-	projections[index] = world_to_view * mat4(
+	out_transforms[index] = world_to_view * mat4(
 		vec4(axes[0], 0),
 		vec4(axes[1], 0),
 		vec4(axes[2], 0),

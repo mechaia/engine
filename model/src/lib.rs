@@ -1,6 +1,7 @@
-use glam::{Quat, Vec2, Vec3, Vec3A};
-
 pub mod gltf;
+
+use glam::{Vec2, Vec3};
+use util::Transform;
 
 #[derive(Default)]
 pub struct Collection {
@@ -14,13 +15,6 @@ pub struct Collection {
 pub struct Model {
     pub mesh_index: usize,
     pub armature_index: usize,
-}
-
-#[repr(align(16))]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Transform {
-    pub rotation: Quat,
-    pub translation: Vec3A,
 }
 
 pub struct Mesh {
@@ -133,8 +127,6 @@ impl Armature {
             self.calc_inv_transforms_rec(&Transform::IDENTITY, &mut index);
         }
 
-        dbg!(&self.model_to_local_bone);
-
         #[cfg(debug_assertions)]
         {
             let trfs = (0..self.output_count)
@@ -172,7 +164,12 @@ impl Armature {
         }
     }
 
-    pub fn apply(&self, base_transform: &Transform, transforms: &[Transform], inverse: bool) -> Box<[Transform]> {
+    pub fn apply(
+        &self,
+        base_transform: &Transform,
+        transforms: &[Transform],
+        inverse: bool,
+    ) -> Box<[Transform]> {
         assert_eq!(transforms.len(), self.bones.len());
 
         let mut out = (0..self.output_count)
@@ -216,35 +213,6 @@ impl Armature {
 
     pub fn apply_direct(&self, index: usize, transform: &Transform) -> Transform {
         transform.apply_to_transform(&self.model_to_local_bone[index])
-    }
-}
-
-impl Transform {
-    pub const IDENTITY: Self = Self {
-        rotation: Quat::IDENTITY,
-        translation: Vec3A::ZERO,
-    };
-
-    fn apply_to_transform(&self, child: &Self) -> Self {
-        let translation = self.translation + (self.rotation * child.translation);
-        let rotation = self.rotation * child.rotation;
-        Self {
-            rotation,
-            translation,
-        }
-    }
-
-    fn inverse(&self) -> Self {
-        let rotation = self.rotation.inverse();
-        let translation = rotation * -self.translation;
-        Self {
-            rotation,
-            translation,
-        }
-    }
-
-    fn is_identity(&self) -> bool {
-        self.translation == Vec3A::ONE && self.rotation == Quat::IDENTITY
     }
 }
 

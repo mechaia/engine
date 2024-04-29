@@ -72,8 +72,6 @@ impl SwapChain {
                 .get_physical_device_surface_capabilities(physical_device, surface)
                 .unwrap()
         };
-        let extent = surface_capabilities.current_extent;
-        let format = surface_format.format;
 
         let queuefamilies = [graphics_queue_index];
         let create_info = vk::SwapchainCreateInfoKHR::builder()

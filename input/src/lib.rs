@@ -1,5 +1,7 @@
-use std::{collections::HashMap, ops::RangeInclusive};
-
+use std::{
+    collections::{hash_map::Entry, HashMap, VecDeque},
+    ops::RangeInclusive,
+};
 pub use window::SmolStr;
 
 pub type Key = window::InputKey;
@@ -7,7 +9,9 @@ pub type Key = window::InputKey;
 /// Mapping of inputs
 #[derive(Clone, Debug, Default)]
 pub struct InputMap {
-    label_to_input: HashMap<Box<str>, Vec<(Key, Remap)>>,
+    label_map: HashMap<Box<str>, usize>,
+    input_map: HashMap<Key, Vec<usize>>,
+    list: Vec<(Box<str>, Vec<(Key, Remap)>)>,
 }
 
 /// Remap input to a different range
@@ -16,6 +20,33 @@ pub struct Remap {
     range: RangeInclusive<f32>,
     scale: f32,
     offset: f32,
+}
+
+/// Track input state and events
+#[derive(Default)]
+pub struct InputState {
+    /// Current input value
+    ///
+    /// If not present, default to 0.0
+    current_key: HashMap<Key, f32>,
+    /// Current input value
+    ///
+    /// If not present, default to 0.0
+    current_name: HashMap<Box<str>, f32>,
+    /// Input events
+    events: Vec<Event>,
+}
+
+pub struct Event {
+    pub key: KeyOrName,
+    pub prev: f32,
+    pub cur: f32,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum KeyOrName {
+    Key(Key),
+    Name(Box<str>),
 }
 
 impl InputMap {
@@ -28,14 +59,34 @@ impl InputMap {
     }
 
     pub fn add(&mut self, label: Box<str>, input: Key, remap: Remap) {
-        self.label_to_input
-            .entry(label)
-            .or_default()
-            .push((input, remap));
+        let value = (input.clone(), remap);
+        let i = match self.label_map.entry(label.clone()) {
+            Entry::Occupied(v) => {
+                self.list[*v.get()].1.push(value);
+                *v.get()
+            }
+            Entry::Vacant(v) => {
+                self.list.push((label.clone(), Vec::from([value])));
+                *v.insert(self.list.len() - 1)
+            }
+        };
+        self.input_map.entry(input).or_default().push(i);
     }
 
-    pub fn get(&self, label: &str) -> &[(Key, Remap)] {
-        self.label_to_input.get(label).map_or(&[], |v| &**v)
+    pub fn get_by_name(&self, label: &str) -> impl Iterator<Item = (&Key, &Remap)> {
+        self.label_map
+            .get(label)
+            .map_or(&[][..], |v| &self.list[*v].1)
+            .iter()
+            .map(|(a, b)| (a, b))
+    }
+
+    pub fn get_by_key(&self, key: &Key) -> impl Iterator<Item = &str> {
+        self.input_map
+            .get(key)
+            .into_iter()
+            .flat_map(|v| v.iter().copied())
+            .map(|i| &*self.list[i].0)
     }
 }
 
@@ -64,32 +115,81 @@ impl Remap {
     }
 }
 
-/// Filter to make boolean input edge-triggered.
-#[derive(Default)]
-pub struct TriggerEdge {
-    prev: bool,
-}
+impl InputState {
+    pub fn push_key(&mut self, key: Key, value: f32) {
+        let prev = if value == 0.0 {
+            self.current_key.remove(&key)
+        } else {
+            self.current_key.insert(key.clone(), value)
+        };
+        self.events.push(Event {
+            key: KeyOrName::Key(key),
+            prev: prev.unwrap_or(0.0),
+            cur: value,
+        });
+    }
 
-impl TriggerEdge {
-    pub fn apply(&mut self, input: f32) -> bool {
-        let p = self.prev;
-        self.prev = input > 0.0;
-        !p & self.prev
+    pub fn push_name(&mut self, name: Box<str>, value: f32) {
+        let prev = if value == 0.0 {
+            self.current_name.remove(&name)
+        } else {
+            self.current_name.insert(name.clone(), value)
+        };
+        self.events.push(Event {
+            key: KeyOrName::Name(name),
+            prev: prev.unwrap_or(0.0),
+            cur: value,
+        });
+    }
+
+    /// Get the current value of an input.
+    pub fn get_by_key(&self, key: &Key) -> f32 {
+        *self.current_key.get(key).unwrap_or(&0.0)
+    }
+
+    /// Get the current value of an input.
+    pub fn get_by_name(&self, name: &str) -> f32 {
+        *self.current_name.get(name).unwrap_or(&0.0)
+    }
+
+    /// Iterate over events pushed after the last clear.
+    pub fn events(&self) -> impl Iterator<Item = &Event> {
+        self.events.iter()
+    }
+
+    /// Clear input events
+    pub fn clear_events(&mut self) {
+        self.events.clear();
     }
 }
 
-/// Filter to make boolean input "toggled" on edge trigger
-// FIXME what was the damn term? "hold"?
-#[derive(Default)]
-pub struct TriggerToggle {
-    edge: TriggerEdge,
-    value: bool,
-}
+impl Event {
+    pub fn is_hold(&self) -> bool {
+        self.prev == self.cur
+    }
 
-impl TriggerToggle {
-    pub fn apply(&mut self, input: f32) -> bool {
-        self.value ^= self.edge.apply(input);
-        self.value
+    pub fn is_hold_over(&self, threshold: f32) -> bool {
+        self.is_hold() && threshold <= self.cur
+    }
+
+    pub fn is_hold_under(&self, threshold: f32) -> bool {
+        self.is_hold() && threshold > self.cur
+    }
+
+    pub fn is_edge_over(&self, threshold: f32) -> bool {
+        self.prev < threshold && threshold <= self.cur
+    }
+
+    pub fn is_edge_under(&self, threshold: f32) -> bool {
+        self.prev >= threshold && threshold > self.cur
+    }
+
+    pub fn is_edge_or_hold_over(&self, threshold: f32) -> bool {
+        self.is_hold_over(threshold) || self.is_edge_over(threshold)
+    }
+
+    pub fn is_edge_or_hold_under(&self, threshold: f32) -> bool {
+        self.is_hold_under(threshold) || self.is_edge_under(threshold)
     }
 }
 
@@ -141,11 +241,12 @@ impl InputMap {
 fn str_to_key(key: &str) -> Option<Key> {
     use window::InputKey::*;
     Some(if key.starts_with(":") {
+        let u = |s| Unicode(SmolStr::new_inline(s));
         match &*key[1..].to_lowercase() {
             ":" | "!" | "+" | "-" | "%" | "/" | "*" => Unicode(SmolStr::new_inline(&key[1..])),
-            "space" => Unicode(SmolStr::new_inline(" ")),
-            "enter" => Unicode(SmolStr::new_inline("\n")),
-            "tab" => Unicode(SmolStr::new_inline("\t")),
+            "space" => u(" "),
+            "enter" => u("\n"),
+            "tab" => u("\t"),
             "alt" => Alt,
             "altgr" => AltGr,
             "lctrl" => LCtrl,
@@ -165,9 +266,18 @@ fn str_to_key(key: &str) -> Option<Key> {
             "arrowdown" => ArrowDown,
             "arrowleft" => ArrowLeft,
             "arrowright" => ArrowRight,
+            "ampersand" => u("&"),
+            "pipe" => u("|"),
+            "hat" => u("^"),
+            "exclamation" => u("!"),
+            "question" => u("?"),
+            "star" => u("*"),
+            "percent" => u("%"),
+            "plus" => u("+"),
+            "minux" => u("-"),
             _ => return None,
         }
-    } else if "!+-/%*".contains(key.chars().next().unwrap()) {
+    } else if " \n\t!+-/%*&|^?".contains(key.chars().next().unwrap()) {
         return None;
     } else {
         Unicode(SmolStr::new(key))

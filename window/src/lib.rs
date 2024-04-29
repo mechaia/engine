@@ -1,5 +1,9 @@
 use glam::UVec2;
-use std::{collections::HashMap, hash::DefaultHasher, time::Instant};
+use std::{
+    collections::HashMap,
+    hash::DefaultHasher,
+    time::{Duration, Instant},
+};
 use winit::{
     event::{DeviceEvent, ElementState, KeyEvent, MouseScrollDelta, StartCause, WindowEvent},
     event_loop::EventLoop,
@@ -74,11 +78,19 @@ impl Window {
     }
 
     pub fn wait(&mut self, until: Instant) -> Vec<Event> {
-        let Some(dur) = until.checked_duration_since(Instant::now()) else {
-            return Vec::new();
-        };
+        let dur = until
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
         let mut events = Vec::new();
         type E<'a, T> = winit::event::Event<T>;
+
+        for key in [InputKey::MouseRelativeX, InputKey::MouseRelativeY] {
+            events.push(Event::Input(Input {
+                value: self.input(&key),
+                key,
+            }));
+        }
+
         self.event_loop
             .pump_events(Some(dur), |event, _| match event {
                 E::WindowEvent {

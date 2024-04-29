@@ -6,15 +6,12 @@ use rapier3d::{
         self, CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
         RigidBody, RigidBodyBuilder, RigidBodySet,
     },
-    geometry::{
-        self, BroadPhase, Collider, ColliderBuilder, ColliderSet, NarrowPhase, Ray, SharedShape,
-    },
+    geometry::{self, BroadPhase, ColliderBuilder, ColliderSet, NarrowPhase, Ray, SharedShape},
     math::{Isometry, Point, Translation, Vector},
     na::{Quaternion, Unit},
     pipeline::{PhysicsPipeline, QueryFilter, QueryFilterFlags, QueryPipeline},
 };
-use std::num::NonZeroU32;
-use std::ops::Index;
+use util::Transform;
 
 pub struct Physics {
     physics_pipeline: PhysicsPipeline,
@@ -42,12 +39,6 @@ pub struct ColliderHandle(geometry::ColliderHandle);
 pub struct SensorHandle(geometry::ColliderHandle);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ShapeHandle(util::ArenaHandle);
-
-#[derive(Clone, Copy, Debug)]
-pub struct Transform {
-    pub rotation: Quat,
-    pub translation: Vec3,
-}
 
 #[derive(Clone, Copy, Debug)]
 pub struct ColliderProperties {
@@ -225,7 +216,8 @@ impl Physics {
             .sensor(false)
             .position(transform_to_isometry(properties.local_transform))
             .friction(properties.friction)
-            .restitution(properties.bounciness);
+            .restitution(properties.bounciness)
+            .user_data(properties.user_data.into());
         let h = self
             .collider_set
             .insert_with_parent(collider, body.0, &mut self.rigid_body_set);
@@ -246,6 +238,17 @@ impl Physics {
             .collider_set
             .insert_with_parent(collider, body.0, &mut self.rigid_body_set);
         SensorHandle(h)
+    }
+
+    pub fn destroy_rigid_body(&mut self, body: RigidBodyHandle) {
+        self.rigid_body_set.remove(
+            body.0,
+            &mut self.island_manager,
+            &mut self.collider_set,
+            &mut self.impulse_joint_set,
+            &mut self.multibody_joint_set,
+            true,
+        );
     }
 
     pub fn remove_collider(&mut self, body: RigidBodyHandle, collider: ColliderHandle) {
@@ -421,7 +424,7 @@ fn glam_to_unit_vector(v: Vec3) -> Unit<Vector<f32>> {
 }
 
 fn glam_to_rotation(q: Quat) -> Unit<Quaternion<f32>> {
-    Unit::new_unchecked(Quaternion::new(q.x, q.y, q.z, q.w))
+    Unit::new_unchecked(Quaternion::new(q.w, q.x, q.y, q.z))
 }
 
 fn transform_to_isometry(tr: Transform) -> Isometry<f32> {
@@ -451,52 +454,5 @@ fn isometry_to_transform(iso: Isometry<f32>) -> Transform {
     Transform {
         translation: translation_to_glam(iso.translation),
         rotation: rotation_to_glam(iso.rotation),
-    }
-}
-
-impl Transform {
-    pub const IDENTITY: Self = Self {
-        translation: Vec3::ZERO,
-        rotation: Quat::IDENTITY,
-    };
-
-    pub fn apply_to_translation(&self, translation: Vec3) -> Vec3 {
-        self.translation + (self.rotation * translation)
-    }
-
-    pub fn apply_to_translation_inv(&self, translation: Vec3) -> Vec3 {
-        self.rotation.inverse() * (translation - self.translation)
-    }
-
-    pub fn apply_to_direction(&self, direction: Vec3) -> Vec3 {
-        self.rotation * direction
-    }
-
-    pub fn apply_to_direction_inv(&self, direction: Vec3) -> Vec3 {
-        self.rotation.inverse() * direction
-    }
-
-    pub fn apply_to_transform(&self, transform: &Self) -> Self {
-        Self {
-            translation: self.translation + self.rotation * transform.translation,
-            rotation: self.rotation * transform.rotation,
-        }
-    }
-
-    pub fn interpolate(&self, to: &Self, s: f32) -> Self {
-        Self {
-            translation: self.translation.lerp(to.translation, s),
-            rotation: self.rotation.slerp(to.rotation, s),
-        }
-    }
-}
-
-impl From<Transform> for util::Transform {
-    fn from(value: Transform) -> Self {
-        Self {
-            translation: value.translation,
-            rotation: value.rotation,
-            scale: 1.0,
-        }
     }
 }

@@ -1,10 +1,11 @@
 #version 460
 
 layout (binding = 0) uniform Camera {
+    mat4 world_to_view;
     mat4 view_to_projection;
 };
 
-layout (binding = 1) readonly buffer Transforms {
+layout (binding = 2) readonly buffer Transforms {
 	mat4 transforms[];
 };
 
@@ -22,31 +23,6 @@ layout (location = 1) out vec3 out_normal;
 layout (location = 2) out vec2 out_uv;
 layout (location = 3) out flat uint out_material_index;
 
-/*
-void main() {
-	vec3 pos = vec3(0);
-	vec3 norm = vec3(0);
-
-	//for (uint i = 0; i < 4; i++) {
-	//for (uint i = 0; i < 1; i++) {
-		mat4 proj = transforms[transforms_offset + joints[0]];
-		/*
-		pos += weights[i] * (proj * vec4(position, 1)).xyz;
-		norm += weights[i] * (proj * vec4(normal, 0)).xyz;
-		*/
-/*
-		pos += (proj * vec4(position, 1)).xyz;
-		norm += (proj * vec4(normal, 0)).xyz;
-	//}
-
-	gl_Position = vec4(pos, 1);
-
-	out_position = (inv_projection * gl_Position).xyz;
-	out_normal = norm;
-	out_uv = uv;
-    out_material_index = material_index;
-}
-*/
 void main() {
 	vec3 pos = vec3(0);
 	vec3 norm = vec3(0);
@@ -61,7 +37,6 @@ void main() {
 	gl_Position = view_to_projection * vec4(pos, 1);
 
 	out_position = pos;
-	//out_normal = (view_to_projection * vec4(norm, 0)).xyz;
 	out_normal = norm;
 
 	out_uv = uv;

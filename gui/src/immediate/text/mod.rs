@@ -2,56 +2,96 @@ use super::Rect;
 use crate::{font::FontMap, Draw, Instance};
 use glam::{IVec2, U16Vec2, Vec4};
 
-/// Automatically clips out-of-bounds text.
-pub fn draw(
-    draw: &mut Draw<'_>,
-    mut pos: IVec2,
-    clip: Rect<U16Vec2>,
-    text: &str,
+pub struct Text<'a, 'b> {
+    draw: &'a mut Draw<'b>,
+    clip: Rect,
+    pos: IVec2,
+    line_start: i32,
     texture: u32,
     color: Vec4,
-    font_map: &FontMap,
-) {
-    // TODO newlines, wrapping ...
-    // We need a layouter for glyphs
+    font_map: &'a FontMap,
+    wrap_mode: WrapMode,
+}
 
-    let mut i = 0;
-    for chr in text.chars() {
-        let r = font_map.get(chr).unwrap();
+pub enum WrapMode {
+    Clip,
+    WordWrap { line_width: u16 },
+    WordBreak { line_width: u16 },
+}
+
+impl<'a, 'b> Text<'a, 'b> {
+    pub fn new(
+        draw: &'a mut Draw<'b>,
+        font_texture: u32,
+        font_map: &'a FontMap,
+        start: IVec2,
+        clip: Rect,
+    ) -> Self {
+        let clip = {
+            let d = clip.start().min(IVec2::ZERO);
+            Rect::from_start_end(clip.start() + d, clip.end()).unwrap()
+        };
+
+        Self {
+            draw,
+            texture: font_texture,
+            font_map,
+            color: Vec4::ONE,
+            wrap_mode: WrapMode::Clip,
+            pos: start,
+            line_start: start.x,
+            clip,
+        }
+    }
+
+    pub fn set_color(&mut self, color: Vec4) {
+        self.color = color;
+    }
+
+    pub fn push(&mut self, chr: char) {
+        if chr == '\n' {
+            self.pos.x = self.line_start;
+            self.pos.y += i32::from(self.font_map.line_height());
+            return;
+        }
+
+        let r = self.font_map.get(chr).unwrap();
 
         let rect = Rect {
-            offset: pos,
+            offset: self.pos,
             size: r.size,
         };
-        let (clipped, delta) = clip.clip_rect(&rect);
+        let (clipped, delta) = self.clip.clip_rect(&rect);
 
         if let Some(clipped) = clipped {
-            /*
-            if pos.x >= i32::from(r.size.x) {
-                break;
-            }
-
-            let position = pos.max(IVec2::ZERO);
-            let clip = pos - position;
-            let size = (IVec2::from(size) - clip).max(IVec2::ZERO);
-            */
-
             let uv_start = IVec2::from(r.texture.start) + IVec2::new(delta.left, delta.top);
             let uv_end = IVec2::from(r.texture.end) + IVec2::new(delta.right, delta.bottom);
 
             let inst = Instance {
-                position: clipped.offset,
+                position: clipped.offset.try_into().unwrap(),
                 size: clipped.size,
                 rotation: 0.0,
-                uv_start: uv_start.as_vec2() / font_map.dimensions().as_vec2(),
-                uv_end: uv_end.as_vec2() / font_map.dimensions().as_vec2(),
-                texture,
-                color,
+                uv_start: uv_start.as_vec2() / self.font_map.dimensions().as_vec2(),
+                uv_end: uv_end.as_vec2() / self.font_map.dimensions().as_vec2(),
+                texture: self.texture,
+                color: self.color,
             };
-            draw.push(&inst);
+            self.draw.push(&inst);
         }
 
-        pos.x += i32::from(r.size.x);
+        match &self.wrap_mode {
+            WrapMode::Clip => self.pos.x += i32::from(r.size.x),
+            WrapMode::WordWrap { line_width } => {}
+            WrapMode::WordBreak { line_width } => {}
+        }
+    }
+}
+
+impl Extend<char> for Text<'_, '_> {
+    fn extend<T: IntoIterator<Item = char>>(&mut self, iter: T) {
+        for c in iter {
+            self.push(c);
+        }
     }
 }
 

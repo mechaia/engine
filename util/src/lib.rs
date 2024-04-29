@@ -39,6 +39,10 @@ impl ArenaHandle {
     fn as_index(&self) -> usize {
         usize::try_from(self.0.get()).unwrap() - 1
     }
+
+    fn from_index(index: usize) -> Self {
+        ArenaHandle(NonZeroU32::new(u32::try_from(index + 1).unwrap()).unwrap())
+    }
 }
 
 impl<T> Default for Arena<T> {
@@ -71,10 +75,10 @@ impl<T> Arena<T> {
     pub fn insert(&mut self, value: T) -> ArenaHandle {
         if let Some(i) = self.buf.iter_mut().position(|e| e.is_none()) {
             self.buf[i] = Some(value);
-            ArenaHandle(NonZeroU32::new((i + 1).try_into().unwrap()).unwrap())
+            ArenaHandle::from_index(i)
         } else {
             self.buf.push(Some(value));
-            ArenaHandle(NonZeroU32::new(self.buf.len().try_into().unwrap()).unwrap())
+            ArenaHandle::from_index(self.buf.len() - 1)
         }
     }
 
@@ -87,20 +91,141 @@ impl<T> Arena<T> {
         self.values().count()
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (ArenaHandle, &T)> + '_ {
+        self.buf
+            .iter()
+            .enumerate()
+            .flat_map(|(i, x)| x.as_ref().map(move |x| (ArenaHandle::from_index(i), x)))
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (ArenaHandle, &mut T)> + '_ {
+        self.buf
+            .iter_mut()
+            .enumerate()
+            .flat_map(|(i, x)| x.as_mut().map(move |x| (ArenaHandle::from_index(i), x)))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = ArenaHandle> + '_ {
+        self.iter().map(|(i, _)| i)
+    }
+
     pub fn values(&self) -> impl Iterator<Item = &T> + '_ {
-        self.buf.iter().flat_map(|x| x.as_ref())
+        self.iter().map(|(_, x)| x)
     }
 
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> + '_ {
-        self.buf.iter_mut().flat_map(|x| x.as_mut())
+        self.iter_mut().map(|(_, x)| x)
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Transform {
     pub translation: Vec3,
     pub rotation: Quat,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TransformScale {
+    pub translation: Vec3,
     pub scale: f32,
+    pub rotation: Quat,
+}
+
+impl Transform {
+    pub const IDENTITY: Self = Self {
+        translation: Vec3::ZERO,
+        rotation: Quat::IDENTITY,
+    };
+
+    pub fn new(translation: Vec3, rotation: Quat) -> Self {
+        Self {
+            translation,
+            rotation,
+        }
+    }
+
+    pub fn apply_to_translation(&self, translation: Vec3) -> Vec3 {
+        self.translation + (self.rotation * translation)
+    }
+
+    pub fn apply_to_translation_inv(&self, translation: Vec3) -> Vec3 {
+        self.rotation.inverse() * (translation - self.translation)
+    }
+
+    pub fn apply_to_direction(&self, direction: Vec3) -> Vec3 {
+        self.rotation * direction
+    }
+
+    pub fn apply_to_direction_inv(&self, direction: Vec3) -> Vec3 {
+        self.rotation.inverse() * direction
+    }
+
+    pub fn apply_to_transform(&self, transform: &Self) -> Self {
+        Self {
+            translation: self.translation + self.rotation * transform.translation,
+            rotation: self.rotation * transform.rotation,
+        }
+    }
+
+    pub fn interpolate(&self, to: &Self, s: f32) -> Self {
+        Self {
+            translation: self.translation.lerp(to.translation, s),
+            rotation: self.rotation.slerp(to.rotation, s),
+        }
+    }
+
+    pub fn inverse(&self) -> Self {
+        let rotation = self.rotation.inverse();
+        let translation = rotation * -self.translation;
+        Self {
+            rotation,
+            translation,
+        }
+    }
+
+    pub fn from_rotation_x(angle: f32) -> Self {
+        Self::IDENTITY.with_rotation(Quat::from_rotation_x(angle))
+    }
+
+    pub fn from_rotation_y(angle: f32) -> Self {
+        Self::IDENTITY.with_rotation(Quat::from_rotation_y(angle))
+    }
+
+    pub fn from_rotation_z(angle: f32) -> Self {
+        Self::IDENTITY.with_rotation(Quat::from_rotation_z(angle))
+    }
+
+    pub fn with_translation(&self, translation: Vec3) -> Self {
+        Self {
+            translation,
+            rotation: self.rotation,
+        }
+    }
+
+    pub fn with_rotation(&self, rotation: Quat) -> Self {
+        Self {
+            translation: self.translation,
+            rotation,
+        }
+    }
+}
+
+impl TransformScale {
+    pub const IDENTITY: Self = Self {
+        translation: Vec3::ZERO,
+        scale: 1.0,
+        rotation: Quat::IDENTITY,
+    };
+}
+
+impl From<Transform> for TransformScale {
+    fn from(value: Transform) -> Self {
+        Self {
+            translation: value.translation,
+            rotation: value.rotation,
+            scale: 1.0,
+        }
+    }
 }
 
 pub struct ChunkedVec<T, const CHUNK_SIZE: usize = 64> {
@@ -109,7 +234,17 @@ pub struct ChunkedVec<T, const CHUNK_SIZE: usize = 64> {
 }
 
 impl<T, const CHUNK_SIZE: usize> ChunkedVec<T, CHUNK_SIZE> {
-    pub fn push(&mut self) {
+    pub fn push(&mut self, value: T) {
+        let (i, k) = (self.len / CHUNK_SIZE, self.len % CHUNK_SIZE);
+        if k % CHUNK_SIZE == 0 {
+            self.new_chunk();
+        }
+        self.buf[i][k].write(value);
+        self.len += 1;
+        todo!();
+    }
+
+    fn new_chunk(&mut self) {
         todo!();
     }
 }

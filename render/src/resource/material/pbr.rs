@@ -5,20 +5,9 @@ use glam::Vec4;
 use vk_mem::Alloc;
 
 pub struct PbrMaterialSet {
-    pool: vk::DescriptorPool,
-    layout: vk::DescriptorSetLayout,
-    set: vk::DescriptorSet,
     buffer: VmaBuffer,
-}
-
-pub struct PbrMaterialSetBuilder<'a> {
-    render: &'a mut Render,
-    pool: vk::DescriptorPool,
-    layout: vk::DescriptorSetLayout,
-    set: vk::DescriptorSet,
-    buffer: VmaBuffer,
-    material_index: u32,
-    material_count: u32,
+    len: u32,
+    capacity: u32,
 }
 
 pub type TextureHandle = u32;
@@ -49,39 +38,10 @@ struct PbrMaterialData {
 }
 
 impl PbrMaterialSet {
-    pub fn builder(render: &mut Render, count: u32) -> PbrMaterialSetBuilder {
-        let pool = render.make_descriptor_pool(
-            1,
-            &[vk::DescriptorPoolSize {
-                //ty: vk::DescriptorType::STORAGE_BUFFER,
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                descriptor_count: 1,
-            }],
-        );
-        let layout = unsafe {
-            let bindings = [vk::DescriptorSetLayoutBinding::builder()
-                //.descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT)]
-            .map(|x| x.build());
-            let info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
-            render
-                .dev
-                .create_descriptor_set_layout(&info, None)
-                .unwrap()
-        };
-        let set = unsafe {
-            let layouts = [layout];
-            let info = vk::DescriptorSetAllocateInfo::builder()
-                .descriptor_pool(pool)
-                .set_layouts(&layouts);
-            render.dev.allocate_descriptor_sets(&info).unwrap()[0]
-        };
+    pub fn new(render: &mut Render, capacity: u32) -> Self {
         let buffer = unsafe {
             let info = vk::BufferCreateInfo::builder()
-                .size(mem::size_of::<PbrMaterialData>() as u64 * u64::from(count))
-                //.usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER)
+                .size(mem::size_of::<PbrMaterialData>() as u64 * u64::from(capacity))
                 .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::UNIFORM_BUFFER)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE);
             let c_info = vk_mem::AllocationCreateInfo {
@@ -92,29 +52,15 @@ impl PbrMaterialSet {
             render.dev.alloc.create_buffer(&info, &c_info).unwrap()
         };
 
-        PbrMaterialSetBuilder {
-            render,
-            pool,
-            layout,
-            set,
+        Self {
             buffer,
-            material_index: 0,
-            material_count: count,
+            len: 0,
+            capacity,
         }
     }
 
-    pub fn layout(&self) -> vk::DescriptorSetLayout {
-        self.layout
-    }
-
-    pub fn set(&self) -> vk::DescriptorSet {
-        self.set
-    }
-}
-
-impl<'a> PbrMaterialSetBuilder<'a> {
-    pub fn push(mut self, material: &PbrMaterial) -> Self {
-        assert!(self.material_index < self.material_count);
+    pub fn push(&mut self, render: &mut Render, material: &PbrMaterial) {
+        assert!(self.len < self.capacity);
 
         let mat = PbrMaterialData {
             albedo: material.albedo.to_array(),
@@ -129,44 +75,27 @@ impl<'a> PbrMaterialSetBuilder<'a> {
         };
 
         unsafe {
-            self.render.commands.transfer_to(
-                &self.render.dev,
+            render.commands.transfer_to(
+                &render.dev,
                 self.buffer.0,
-                u64::try_from(mem::size_of_val(&mat)).unwrap() * u64::from(self.material_index),
+                u64::try_from(mem::size_of_val(&mat)).unwrap() * u64::from(self.len),
                 (&mat as *const PbrMaterialData).cast(),
                 mem::size_of_val(&mat),
             );
         }
 
-        self.material_index += 1;
-        self
+        self.len += 1;
     }
 
-    pub fn build(self) -> PbrMaterialSet {
-        assert_eq!(self.material_index, self.material_count);
-
-        unsafe {
-            let info = [vk::DescriptorBufferInfo {
-                buffer: self.buffer.0,
-                offset: 0,
-                range: vk::WHOLE_SIZE,
-            }];
-            let writes = [vk::WriteDescriptorSet::builder()
-                .dst_set(self.set)
-                .dst_binding(0)
-                .dst_array_element(0)
-                //.descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .buffer_info(&info)]
-            .map(|x| x.build());
-            self.render.dev.update_descriptor_sets(&writes, &[]);
+    pub fn bind_info(&self) -> vk::DescriptorBufferInfo {
+        vk::DescriptorBufferInfo {
+            buffer: self.buffer.0,
+            offset: 0,
+            range: vk::WHOLE_SIZE,
         }
+    }
 
-        PbrMaterialSet {
-            pool: self.pool,
-            layout: self.layout,
-            set: self.set,
-            buffer: self.buffer,
-        }
+    pub fn buffer(&self) -> vk::Buffer {
+        self.buffer.0
     }
 }

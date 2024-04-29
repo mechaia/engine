@@ -5,8 +5,6 @@ use vk_mem::Alloc;
 
 use crate::Dev;
 
-const DRAW_PARAMETERS_SIZE: u32 = mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32;
-
 pub struct Commands {
     pub queues: super::queues::Queues,
     pub pool: vk::CommandPool,
@@ -89,60 +87,6 @@ impl Commands {
         });
     }
 
-    unsafe fn transfer_between_images(
-        &mut self,
-        dev: &ash::Device,
-        dst: vk::Image,
-        dst_offset: UVec3,
-        src: vk::Image,
-        src_offset: UVec3,
-        dimensions: UVec3,
-    ) {
-        let info = vk::CommandBufferAllocateInfo::builder()
-            .command_pool(self.pool)
-            .command_buffer_count(1);
-        let cmdbuf = dev.allocate_command_buffers(&info).unwrap()[0];
-
-        let info = vk::CommandBufferBeginInfo::builder()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        dev.begin_command_buffer(cmdbuf, &info).unwrap();
-        dev.cmd_copy_image(
-            cmdbuf,
-            src,
-            vk::ImageLayout::GENERAL,
-            dst,
-            vk::ImageLayout::PREINITIALIZED,
-            &[vk::ImageCopy {
-                src_subresource: vk::ImageSubresourceLayers {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0,
-                    base_array_layer: 0,
-                    layer_count: 0,
-                },
-                src_offset: uvec3_to_offset3d(src_offset),
-                dst_subresource: vk::ImageSubresourceLayers {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0,
-                    base_array_layer: 0,
-                    layer_count: 0,
-                },
-                dst_offset: uvec3_to_offset3d(dst_offset),
-                extent: uvec3_to_extent3d(dimensions),
-            }],
-        );
-        dev.end_command_buffer(cmdbuf).unwrap();
-
-        let command_buffers = [cmdbuf];
-        let submit_info = [vk::SubmitInfo::builder()
-            .command_buffers(&command_buffers)
-            .build()];
-        dev.queue_submit(self.queues.graphics, &submit_info, vk::Fence::null())
-            .unwrap();
-        dev.queue_wait_idle(self.queues.graphics).unwrap();
-
-        dev.free_command_buffers(self.pool, &[cmdbuf]);
-    }
-
     pub unsafe fn transfer_to_image_with(
         &mut self,
         dev: &Dev,
@@ -154,6 +98,7 @@ impl Commands {
     ) {
         let elem_size = match format {
             vk::Format::R8G8B8A8_UNORM => 4,
+            vk::Format::R8_UNORM => 1,
             _ => todo!(),
         };
         let size =

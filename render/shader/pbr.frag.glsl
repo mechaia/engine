@@ -3,8 +3,8 @@
 #extension GL_EXT_nonuniform_qualifier : enable
 #extension GL_EXT_scalar_block_layout : enable
 
-#define MAX_DIRECTIONAL_LIGHTS (1)
-#define MAX_MATERIALS (4096)
+layout (constant_id = 0) const uint MAX_MATERIALS = 4096;
+layout (constant_id = 1) const uint MAX_DIRECTIONAL_LIGHTS = 1;
 
 const float PI = 3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679;
 
@@ -30,27 +30,15 @@ struct Material {
     uint ambient_occlusion_texture_index;
 };
 
-layout (std430, binding = 2) readonly buffer DirectionalLights {
+layout (std430, binding = 3) readonly buffer DirectionalLights {
     DirectionalLight directional_lights[MAX_DIRECTIONAL_LIGHTS];
 };
 
-/*
-// TODO cluster point and cone lights
-layout (binding = 3) readonly buffer Lights {
-	float ops[];
-};
- */
-
-layout (set = 1, binding = 0) uniform sampler2D textures_rgba[];
-
-layout (std430, set = 2, binding = 0) uniform Materials {
+layout (std430, binding = 4) uniform Materials {
     Material materials[MAX_MATERIALS];
 };
-/*
-layout (std430, set = 2, binding = 0) readonly buffer Materials {
-    Material materials[];
-};
-*/
+
+layout (binding = 5) uniform sampler2D textures_rgba[];
 
 layout (location = 0) in vec3 position;
 layout (location = 1) in vec3 normal_unnormalized;

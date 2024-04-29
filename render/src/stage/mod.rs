@@ -10,7 +10,7 @@ pub struct StageArgs {
 }
 
 pub unsafe trait Stage {
-    unsafe fn record_commands(&self, dev: &ash::Device, args: &StageArgs);
+    unsafe fn record_commands(&self, dev: &crate::Dev, args: &StageArgs);
 
     unsafe fn rebuild_swapchain(
         &mut self,

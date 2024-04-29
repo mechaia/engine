@@ -3,28 +3,19 @@
 //! To ensure nice graphics, layout is done in pixel-space.
 //! Computed layouts are clamped to integers to ensure consistent pixel padding on all borders.
 
-use glam::{IVec2, U16Vec2, UVec2};
-
-use crate::Gui;
+use glam::{IVec2, U16Vec2};
 
 pub mod container;
 pub mod text;
 
-/// Immediate GUI layout helper.
-///
-/// Keeps track of layout.
-pub struct Layouter {
-    stack: Vec<Rect<U16Vec2>>,
-}
-
 #[derive(Clone, Copy, Debug)]
-pub struct Rect<O> {
-    pub offset: O,
+pub struct Rect {
+    pub offset: IVec2,
     pub size: U16Vec2,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Margin<T> {
+pub struct Margins<T> {
     pub left: T,
     pub right: T,
     pub top: T,
@@ -33,65 +24,34 @@ pub struct Margin<T> {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Value {
-    Pixel(u16),
-    Mm(f32),
+    Pixel(i32),
     Norm(f32),
 }
 
-impl Layouter {
-    pub fn new(gui: &Gui) -> Self {
-        let sh = gui.shared.lock().unwrap();
-        let vp = sh.viewport;
-        let mut stack = Vec::new();
-        stack.push(Rect {
-            offset: U16Vec2::ZERO,
-            size: vp,
-        });
-        drop(sh);
-        Self { stack }
+impl Rect {
+    pub fn from_offset_size(offset: IVec2, size: U16Vec2) -> Self {
+        Self { offset, size }
     }
 
-    pub fn push_margin(&mut self, margin: Margin<Value>) {
-        let rect = self.stack.last().expect("root layout");
-
-        let value_to_px = |value: Value, len: u16| {
-            match value {
-                Value::Pixel(v) => v,
-                // FIXME account for dpi
-                Value::Mm(v) => v as u16,
-                Value::Norm(v) => (v * f32::from(len)) as u16,
-            }
-        };
-
-        let left = value_to_px(margin.left, rect.size.x);
-        let right = value_to_px(margin.right, rect.size.x);
-        let top = value_to_px(margin.top, rect.size.y);
-        let bottom = value_to_px(margin.bottom, rect.size.y);
-
-        let new_rect = Rect {
-            offset: rect.offset + U16Vec2::new(left, top),
-            size: rect.size - U16Vec2::new(left + right, top + bottom),
-        };
-
-        self.stack.push(new_rect);
+    pub fn from_start_end(start: IVec2, end: IVec2) -> Option<Self> {
+        Some(Self {
+            offset: start,
+            size: U16Vec2::try_from(end - start).ok()?,
+        })
     }
 
-    /// Get current rect
-    pub fn current(&self) -> Rect<U16Vec2> {
-        *self.stack.last().expect("root layout")
+    pub fn from_corners(a: IVec2, b: IVec2) -> Option<Self> {
+        Self::from_start_end(a.min(b), a.max(b))
     }
 
-    /// Pop a sublayout.
-    ///
-    /// # Panics
-    ///
-    /// No layouts pushed.
-    pub fn pop(&mut self) {
-        self.stack.pop().expect("no layouts");
+    pub fn start(&self) -> IVec2 {
+        self.offset
     }
-}
 
-impl Rect<U16Vec2> {
+    pub fn end(&self) -> IVec2 {
+        self.offset + IVec2::from(self.size)
+    }
+
     /// Determine offset to put rectangle in center of this rectangle.
     ///
     /// Can be negative if `rect_size` is larger than this rectangle.
@@ -103,7 +63,7 @@ impl Rect<U16Vec2> {
     /// Clip a rectangle to fit.
     ///
     /// Returns second rectangle with offsets.
-    pub fn clip_rect(&self, rect: &Rect<IVec2>) -> (Option<Self>, Margin<i32>) {
+    pub fn clip_rect(&self, rect: &Self) -> (Option<Self>, Margins<i32>) {
         let s_start = IVec2::from(self.offset);
         let s_end = s_start + IVec2::from(self.size);
 
@@ -119,16 +79,27 @@ impl Rect<U16Vec2> {
         let n = U16Vec2::try_from(n_end.saturating_sub(n_start))
             .ok()
             .map(|size| Rect {
-                offset: U16Vec2::try_from(n_start).unwrap(),
+                offset: n_start,
                 size,
             });
-        let d = Margin {
+        let d = Margins {
             left: d_start.x,
             top: d_start.y,
             right: d_end.x,
             bottom: d_end.y,
         };
         (n, d)
+    }
+}
+
+impl<T: Clone> Margins<T> {
+    pub fn splat(value: T) -> Self {
+        Self {
+            left: value.clone(),
+            right: value.clone(),
+            top: value.clone(),
+            bottom: value,
+        }
     }
 }
 
@@ -141,7 +112,7 @@ mod test {
     fn rect_even_center_rect_offset_even() {
         assert_eq!(
             Rect {
-                offset: U16Vec2::ZERO,
+                offset: IVec2::ZERO,
                 size: U16Vec2::new(4, 6),
             }
             .center_rect_offset((2, 2).into()),
@@ -154,7 +125,7 @@ mod test {
     fn rect_odd_center_rect_offset_odd() {
         assert_eq!(
             Rect {
-                offset: U16Vec2::ZERO,
+                offset: IVec2::ZERO,
                 size: U16Vec2::new(5, 7),
             }
             .center_rect_offset((1, 1).into()),

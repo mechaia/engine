@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 glam = "0.27.0"
-gltf = "1.4.0"
+gltf = { version = "1.4.0", features = ["extras"] }
 util = { path = "../util", package = "mechaia_util" }

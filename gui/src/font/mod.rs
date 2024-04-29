@@ -44,7 +44,16 @@ impl FontMap {
         b.copy_from_slice(&self.buf);
     }
 
-    pub fn copy_into_rgba(&self, b: &mut [u8]) {
+    pub fn copy_into_gray8(&self, b: &mut [u8]) {
+        assert_eq!(
+            b.len(),
+            self.buf.len(),
+            "dimension mismatch. Correct format?"
+        );
+        b.copy_from_slice(&self.buf);
+    }
+
+    pub fn copy_into_rgba8(&self, b: &mut [u8]) {
         assert_eq!(
             b.len(),
             self.buf.len() * 4,

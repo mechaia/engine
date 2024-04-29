@@ -1,7 +1,6 @@
 use ash::vk;
 use core::{mem, ptr::NonNull};
 use glam::Mat4;
-use vk_mem::Alloc;
 
 pub struct CameraView {
     pub translation: glam::Vec3,
@@ -37,6 +36,11 @@ impl Camera {
     }
 
     pub fn set(&mut self, index: usize, camera: &CameraView) -> (Mat4, Mat4) {
+        self.set_shared(index, camera)
+    }
+
+    /// Set camera value atomically
+    pub fn set_shared(&self, index: usize, camera: &CameraView) -> (Mat4, Mat4) {
         let t = Mat4::from_translation(-camera.translation);
         let r = Mat4::from_quat(camera.rotation);
         let x = Mat4::from_cols_array_2d(&[
@@ -61,6 +65,7 @@ impl Camera {
         let view_to_project = p;
 
         unsafe {
+            // FIXME this is most likely UB if written concurrently, even if we never read it.
             self.buffers[index].1.as_ptr().write(CameraData {
                 world_to_view: world_to_view.to_cols_array(),
                 // TODO decompose so we can eliminate 0 factors in the shader

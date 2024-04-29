@@ -7,6 +7,19 @@ pub struct Slice<'a, R> {
     _marker: PhantomData<&'a R>,
 }
 
+pub struct Vec<R> {
+    len: usize,
+    capacity: usize,
+    raw: R,
+}
+
+// rust is bugging out with move |i| ...
+pub struct IterMut<'a, R> {
+    cur: usize,
+    len: usize,
+    raw: &'a mut R,
+}
+
 impl<'a, R: Raw> Slice<'a, R> {
     pub fn as_slices(&'a self) -> R::ElementSlices<'a> {
         unsafe { self.raw.as_slices(self.len) }
@@ -25,12 +38,6 @@ impl<'a, R: Raw> Slice<'a, R> {
     pub fn len(&self) -> usize {
         self.len
     }
-}
-
-pub struct Vec<R> {
-    len: usize,
-    capacity: usize,
-    raw: R,
 }
 
 impl<R: Raw> Vec<R> {
@@ -68,13 +75,31 @@ impl<R: Raw> Vec<R> {
         (0..self.len).map(move |i| unsafe { self.raw.get_unchecked(i) })
     }
 
+    pub fn iter_mut<'a>(&'a mut self) -> IterMut<'a, R> {
+        IterMut {
+            cur: 0,
+            len: self.len,
+            raw: &mut self.raw,
+        }
+    }
+
     pub fn push(&mut self, value: R::Element) {
         if self.capacity <= self.len {
             self.grow(self.len + 1);
         }
         unsafe {
             self.raw.set_unchecked(self.len, value);
-            self.set_len(self.len + 1);
+            self.len += 1;
+        }
+    }
+
+    pub fn pop(&mut self) -> Option<R::Element> {
+        if self.is_empty() {
+            return None;
+        }
+        unsafe {
+            self.len -= 1;
+            Some(self.raw.take_unchecked(self.len))
         }
     }
 
@@ -86,8 +111,27 @@ impl<R: Raw> Vec<R> {
         }
     }
 
-    unsafe fn set_len(&mut self, new_len: usize) {
-        self.len = new_len;
+    pub fn get_mut(&mut self, index: usize) -> Option<R::ElementMut<'_>> {
+        if index < self.len() {
+            unsafe { Some(self.raw.get_unchecked_mut(index)) }
+        } else {
+            None
+        }
+    }
+
+    #[track_caller]
+    pub fn set(&mut self, index: usize, value: R::Element) {
+        assert!(index < self.len(), "out of bounds");
+        unsafe {
+            drop(self.raw.take_unchecked(index));
+            self.raw.set_unchecked(index, value);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        while !self.is_empty() {
+            self.pop();
+        }
     }
 
     fn grow(&mut self, mincap: usize) {
@@ -100,6 +144,20 @@ impl<R: Raw> Vec<R> {
     pub fn len(&self) -> usize {
         self.len
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl<R: Raw> Default for Vec<R> {
+    fn default() -> Self {
+        Self {
+            len: 0,
+            capacity: 0,
+            raw: R::DANGLING,
+        }
+    }
 }
 
 impl<R: Raw> FromIterator<R::Element> for Vec<R> {
@@ -108,6 +166,22 @@ impl<R: Raw> FromIterator<R::Element> for Vec<R> {
         let mut slf = Self::with_capacity(iter.size_hint().0);
         iter.for_each(|v| slf.push(v));
         slf
+    }
+}
+
+impl<'a, R: Raw> Iterator for IterMut<'a, R> {
+    type Item = R::ElementMut<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cur >= self.len {
+            return None;
+        }
+        let v = unsafe { self.raw.get_unchecked_mut(self.cur) };
+        // FIXME I cannot figure out why Rust is complaining about &mut self lifetime here
+        // working around with transmute should be safe, but we should address the root issue
+        let v = unsafe { core::mem::transmute(v) };
+        self.cur += 1;
+        Some(v)
     }
 }
 
@@ -137,6 +211,7 @@ pub trait Raw: Copy + sealed::Sealed {
 
     unsafe fn get_unchecked(&self, index: usize) -> Self::ElementRef<'_>;
     unsafe fn get_unchecked_mut(&mut self, index: usize) -> Self::ElementMut<'_>;
+    unsafe fn take_unchecked(&mut self, index: usize) -> Self::Element;
     unsafe fn set_unchecked(&mut self, index: usize, value: Self::Element);
 
     unsafe fn grow(&mut self, old_size: usize, new_size: usize);
@@ -200,6 +275,10 @@ macro_rules! raw {
 
             unsafe fn get_unchecked_mut(&mut self, index: usize) -> Self::ElementMut<'_> {
                 ($(&mut *self.$field.as_ptr().add(index),)*)
+            }
+
+            unsafe fn take_unchecked(&mut self, index: usize) -> Self::Element {
+                ($(self.$field.as_ptr().add(index).read(),)*)
             }
 
             unsafe fn set_unchecked(&mut self, index: usize, value: Self::Element) {

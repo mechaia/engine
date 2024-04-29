@@ -1,4 +1,4 @@
-use glam::{Quat, Vec2, Vec3, Vec3A};
+use glam::{Quat, Vec2, Vec3};
 
 use crate::Transform;
 use core::iter;
@@ -39,7 +39,7 @@ pub fn from_glb_slice(data: &[u8]) -> crate::Collection {
             .map(|n| parse_node_tree(&mut builder, n))
             .collect::<Vec<_>>();
         assert!(!nodes.is_empty(), "scene with no nodes");
-        let node = if nodes.len() == 1 && nodes[0].0.is_identity() {
+        let node = if nodes.len() == 1 && nodes[0].0 == Transform::IDENTITY {
             nodes.into_iter().next().unwrap().1
         } else {
             crate::Node::Parent {
@@ -96,7 +96,7 @@ fn load_nodes(gltf: &::gltf::Gltf) -> Vec<Node> {
         //assert_eq!(scale, [1.0; 3], "non-identity scale");
         nodes.push(Node {
             transform: Transform {
-                translation: Vec3A::from_array(translation),
+                translation: Vec3::from_array(translation),
                 rotation: Quat::from_array(rotation),
             },
             parent: usize::MAX,
@@ -210,8 +210,6 @@ impl Builder<'_> {
         }
 
         let r = skin.reader(source_bin(self.bin));
-        dbg!(r.read_inverse_bind_matrices().unwrap().map(|m| glam::Mat4::from_cols_array_2d(&m)).map(|m| m.to_scale_rotation_translation())
-            .collect::<Vec<_>>());
 
         let armature = build_armature(self.gltf, &skin, &self.nodes);
 
@@ -337,9 +335,12 @@ fn source_bin<'a>(bin: &'a [u8]) -> impl Fn(::gltf::Buffer<'_>) -> Option<&'a [u
 
 fn to_transform(transform: ::gltf::scene::Transform) -> Transform {
     let (translation, rotation, scale) = transform.decomposed();
-    assert!(scale.iter().all(|v| (v - 1.0).abs() < 1e-6), "non-identity scale {scale:?}");
+    assert!(
+        scale.iter().all(|v| (v - 1.0).abs() < 1e-6),
+        "non-identity scale {scale:?}"
+    );
     Transform {
         rotation: Quat::from_array(rotation),
-        translation: Vec3A::from_array(translation),
+        translation: Vec3::from_array(translation),
     }
 }

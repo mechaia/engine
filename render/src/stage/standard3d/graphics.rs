@@ -10,17 +10,15 @@ use glam::{UVec2, Vec3};
 struct GraphicsSubpass {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
-    shared: super::Shared,
+    shared: super::Data,
 }
 
 struct GraphicsSubpassBuilder {
-    set_layout: vk::DescriptorSetLayout,
-    texture_set_layout: vk::DescriptorSetLayout,
-    material_set_layout: vk::DescriptorSetLayout,
-    shared: super::Shared,
+    shared: super::Data,
     transparent: bool,
 }
 
+/// Per-stage data
 pub(super) struct Data {
     /// Projected transforms
     ///
@@ -35,6 +33,15 @@ pub(super) struct Data {
     /// Set by host.
     pub(super) data_instances: VmaBuffer,
     pub(super) data_instances_ptr: NonNull<InstanceData>,
+}
+
+/// Per-set data
+pub(super) struct SetData {
+    per_image: Box<[SetDataPerImage]>,
+}
+
+/// Per-set per-image data
+struct SetDataPerImage {
     /// Draw parameters
     ///
     /// - parameters count
@@ -44,8 +51,6 @@ pub(super) struct Data {
     pub(super) parameters: VmaBuffer,
     /// Pointer to mapped parameters.
     pub(super) parameters_ptr: NonNull<u8>,
-    /// - camera near/far (uniform)
-    pub(super) descriptor_set: vk::DescriptorSet,
 }
 
 #[repr(C)]
@@ -57,8 +62,9 @@ pub(super) struct InstanceData {
 impl Data {
     pub unsafe fn set_instance_data(
         &mut self,
-        meshes: &MeshSet,
-        instance_counts: &[u32],
+        index: usize,
+        set_data: &[super::SetData],
+        mut instance_counts: &[u32],
         instance_data: &mut dyn Iterator<Item = super::Instance>,
     ) {
         let count = instance_counts.iter().sum::<u32>();
@@ -72,25 +78,42 @@ impl Data {
             p = p.add(1);
         }
 
-        let p = self.parameters_ptr.cast::<u32>().as_ptr();
-        p.write(instance_counts.iter().filter(|&&n| n > 0).count() as u32);
-
-        let mut p = p.add(1).cast::<vk::DrawIndexedIndirectCommand>();
         let mut first_instance = 0;
-        for (i, &instance_count) in instance_counts.iter().enumerate() {
-            if instance_count == 0 {
-                continue;
+
+        for set in set_data.iter() {
+            let p = set.graphics.per_image[index]
+                .parameters_ptr
+                .cast::<u32>()
+                .as_ptr();
+            let ic;
+            (ic, instance_counts) = instance_counts.split_at(set.mesh_set.len());
+            p.write(ic.iter().filter(|&&n| n > 0).count() as u32);
+
+            let mut p = p.add(1).cast::<vk::DrawIndexedIndirectCommand>();
+            for (i, &instance_count) in ic.iter().enumerate() {
+                if instance_count == 0 {
+                    continue;
+                }
+                let mesh = set.mesh_set.mesh(i);
+                p.write(vk::DrawIndexedIndirectCommand {
+                    first_instance,
+                    instance_count,
+                    index_count: mesh.index_count,
+                    first_index: mesh.index_offset,
+                    vertex_offset: mesh.vertex_offset as i32,
+                });
+                first_instance += instance_count;
+                p = p.add(1);
             }
-            let mesh = meshes.mesh(i);
-            p.write(vk::DrawIndexedIndirectCommand {
-                first_instance,
-                instance_count,
-                index_count: mesh.index_count,
-                first_index: mesh.index_offset,
-                vertex_offset: mesh.vertex_offset as i32,
-            });
-            first_instance += instance_count;
-            p = p.add(1);
+        }
+    }
+}
+
+impl SetData {
+    pub unsafe fn drop_with(self, dev: &mut crate::Dev) {
+        for mut pi in self.per_image.into_vec().drain(..) {
+            dev.unmap_buffer(&mut pi.parameters);
+            dev.free_buffer(pi.parameters);
         }
     }
 }
@@ -98,44 +121,11 @@ impl Data {
 pub unsafe fn push(
     render: &mut Render,
     render_pass: &mut RenderPassBuilder,
-    shared: super::Shared,
-    material_set_layout: vk::DescriptorSetLayout,
-    texture_set_layout: vk::DescriptorSetLayout,
+    shared: super::Data,
     transparent: bool,
 ) {
-    let set_layout = {
-        let bindings = [
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::VERTEX),
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::VERTEX),
-            vk::DescriptorSetLayoutBinding::builder()
-                .binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT),
-        ]
-        .map(|x| x.build());
-        let info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
-        render
-            .dev
-            .create_descriptor_set_layout(&info, None)
-            .unwrap()
-    };
-
-    shared.lock().unwrap().graphics_descriptor_set_layout = set_layout;
-
     let subpass = render_pass.push(
         GraphicsSubpassBuilder {
-            set_layout,
-            material_set_layout,
-            texture_set_layout,
             shared,
             transparent,
         },
@@ -195,7 +185,7 @@ pub unsafe fn push(
 unsafe impl RenderSubpassBuilder for GraphicsSubpassBuilder {
     unsafe fn build(
         self: Box<Self>,
-        dev: &ash::Device,
+        dev: &crate::Dev,
         render_pass: vk::RenderPass,
         subpass: u32,
     ) -> Box<dyn crate::stage::renderpass::RenderSubpass> {
@@ -306,11 +296,8 @@ unsafe impl RenderSubpassBuilder for GraphicsSubpassBuilder {
             vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
         let layout = {
-            let layouts = [
-                self.set_layout,
-                self.texture_set_layout,
-                self.material_set_layout,
-            ];
+            let shared = self.shared.lock().unwrap();
+            let layouts = [shared.descriptors.layout];
             let push_constant_ranges = [
                 // vec2 inv_viewport
                 // float viewport_y_over_x
@@ -356,77 +343,83 @@ unsafe impl RenderSubpassBuilder for GraphicsSubpassBuilder {
 }
 
 unsafe impl crate::stage::renderpass::RenderSubpass for GraphicsSubpass {
-    unsafe fn record_commands(&self, dev: &ash::Device, args: &crate::StageArgs) {
+    unsafe fn record_commands(&self, dev: &crate::Dev, args: &crate::StageArgs) {
         let shared = self.shared.lock().unwrap();
-        for sh in shared.data_sets.iter() {
-            let data = &sh.per_image[args.index];
-            dev.cmd_bind_pipeline(args.cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            dev.cmd_bind_descriptor_sets(
-                args.cmd,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.layout,
-                0,
-                &[
-                    data.graphics.descriptor_set,
-                    sh.texture_set.set(),
-                    sh.material_set.set(),
-                ],
-                &[],
-            );
+
+        dev.cmd_bind_pipeline(args.cmd, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+        let viewport = UVec2::new(args.viewport.width, args.viewport.height).as_vec2();
+        let inv_viewport = {
+            let inv_vp = 1.0 / viewport;
+            Vec3::new(inv_vp.x, inv_vp.y, viewport.y * inv_vp.x)
+        };
+        dev.cmd_push_constants(
+            args.cmd,
+            self.layout,
+            vk::ShaderStageFlags::FRAGMENT,
+            0,
+            crate::f32_to_bytes(&inv_viewport.to_array()),
+        );
+        let viewports = [vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: viewport.x,
+            height: viewport.y,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        }];
+        let scissors = [vk::Rect2D {
+            offset: vk::Offset2D::default(),
+            extent: args.viewport,
+        }];
+        dev.cmd_set_viewport(args.cmd, 0, &viewports);
+        dev.cmd_set_scissor(args.cmd, 0, &scissors);
+
+        dev.cmd_bind_descriptor_sets(
+            args.cmd,
+            vk::PipelineBindPoint::GRAPHICS,
+            self.layout,
+            0,
+            &[shared.descriptors.sets[args.index]],
+            &[],
+        );
+
+        let pi_data = &shared.per_image[args.index];
+
+        for set in shared.set_data.iter() {
             dev.cmd_bind_vertex_buffers(
                 args.cmd,
                 0,
                 &[
-                    sh.meshes.vertex_data.0,
-                    sh.meshes.vertex_data.0,
-                    sh.meshes.vertex_data.0,
-                    sh.meshes.vertex_data.0,
-                    sh.meshes.vertex_data.0,
-                    data.graphics.data_instances.0,
+                    set.mesh_set.vertex_data.0,
+                    set.mesh_set.vertex_data.0,
+                    set.mesh_set.vertex_data.0,
+                    set.mesh_set.vertex_data.0,
+                    set.mesh_set.vertex_data.0,
+                    pi_data.graphics.data_instances.0,
                 ],
                 &[
-                    sh.meshes.positions_offset,
-                    sh.meshes.normals_offset,
-                    sh.meshes.uvs_offset,
-                    sh.meshes.joints_offset,
-                    sh.meshes.weights_offset,
+                    set.mesh_set.positions_offset,
+                    set.mesh_set.normals_offset,
+                    set.mesh_set.uvs_offset,
+                    set.mesh_set.joints_offset,
+                    set.mesh_set.weights_offset,
                     0,
                 ],
             );
-            let viewport = UVec2::new(args.viewport.width, args.viewport.height).as_vec2();
-            let inv_viewport = {
-                let inv_vp = 1.0 / viewport;
-                Vec3::new(inv_vp.x, inv_vp.y, viewport.y * inv_vp.x)
-            };
-            dev.cmd_push_constants(
+            dev.cmd_bind_index_buffer(
                 args.cmd,
-                self.layout,
-                vk::ShaderStageFlags::FRAGMENT,
+                set.mesh_set.index_data.0,
                 0,
-                crate::f32_to_bytes(&inv_viewport.to_array()),
+                vk::IndexType::UINT32,
             );
-            dev.cmd_bind_index_buffer(args.cmd, sh.meshes.index_data.0, 0, vk::IndexType::UINT32);
-            let viewports = [vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: viewport.x,
-                height: viewport.y,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            }];
-            let scissors = [vk::Rect2D {
-                offset: vk::Offset2D::default(),
-                extent: args.viewport,
-            }];
-            dev.cmd_set_viewport(args.cmd, 0, &viewports);
-            dev.cmd_set_scissor(args.cmd, 0, &scissors);
+
             dev.cmd_draw_indexed_indirect_count(
                 args.cmd,
-                data.graphics.parameters.0,
+                set.graphics.per_image[args.index].parameters.0,
                 4,
-                data.graphics.parameters.0,
+                set.graphics.per_image[args.index].parameters.0,
                 0,
-                sh.meshes.len() as u32,
+                set.mesh_set.len() as u32,
                 mem::size_of::<vk::DrawIndexedIndirectCommand>() as u32,
             );
         }
@@ -434,8 +427,33 @@ unsafe impl crate::stage::renderpass::RenderSubpass for GraphicsSubpass {
 
     unsafe fn rebuild_swapchain(
         &mut self,
-        dev: &mut crate::Dev,
-        swapchain: &crate::swapchain::SwapChain,
+        _dev: &mut crate::Dev,
+        _swapchain: &crate::swapchain::SwapChain,
     ) {
+    }
+}
+
+impl SetData {
+    pub fn new(render: &mut crate::Render, mesh_set: &MeshSet) -> Self {
+        let image_count = unsafe { render.swapchain.image_count() };
+        let per_image = (0..image_count)
+            .map(|_index| {
+                let mut parameters = render.dev.allocate_buffer(
+                    4 + super::buffer_size::<vk::DrawIndexedIndirectCommand>(
+                        u32::try_from(mesh_set.len()).unwrap(),
+                    ),
+                    vk::BufferUsageFlags::INDIRECT_BUFFER,
+                    true,
+                );
+                let parameters_ptr = render.dev.map_buffer(&mut parameters);
+
+                SetDataPerImage {
+                    parameters,
+                    parameters_ptr,
+                }
+            })
+            .collect();
+
+        Self { per_image }
     }
 }

@@ -3,24 +3,16 @@ use ash::vk;
 use glam::{UVec2, UVec3};
 use vk_mem::Alloc;
 
-pub struct TextureSet {
-    pool: vk::DescriptorPool,
-    layout: vk::DescriptorSetLayout,
-    set: vk::DescriptorSet,
-    sampler: vk::Sampler,
-    images: Box<[(VmaImage, vk::ImageView)]>,
-    format: TextureFormat,
+use super::Shared;
+
+pub struct Texture {
+    image: VmaImage,
+    format: vk::Format,
 }
 
-pub struct TextureSetBuilder<'a> {
-    render: &'a mut Render,
-    pool: vk::DescriptorPool,
-    layout: vk::DescriptorSetLayout,
-    set: vk::DescriptorSet,
-    sampler: vk::Sampler,
-    images: Vec<(VmaImage, vk::ImageView)>,
-    image_count: usize,
-    format: TextureFormat,
+pub struct TextureView {
+    texture: Shared<Texture>,
+    image_view: vk::ImageView,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -29,91 +21,22 @@ pub enum TextureFormat {
     Gray8Unorm,
 }
 
-impl TextureSet {
-    pub fn builder(
+impl Texture {
+    pub fn new(
         render: &mut Render,
+        dimensions: UVec2,
         format: TextureFormat,
-        texture_count: usize,
-    ) -> TextureSetBuilder {
-        let pool = render.make_descriptor_pool(
-            1,
-            &[vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                descriptor_count: texture_count.try_into().unwrap(),
-            }],
-        );
-        let layout = unsafe {
-            let bindings = [vk::DescriptorSetLayoutBinding::builder()
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(texture_count.try_into().unwrap())
-                .stage_flags(vk::ShaderStageFlags::FRAGMENT)
-                .build()];
-            let info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
-            render
-                .dev
-                .create_descriptor_set_layout(&info, None)
-                .unwrap()
-        };
-        let set = unsafe {
-            let layouts = [layout];
-            let info = vk::DescriptorSetAllocateInfo::builder()
-                .descriptor_pool(pool)
-                .set_layouts(&layouts);
-            render.dev.allocate_descriptor_sets(&info).unwrap()[0]
-        };
-        let sampler = unsafe {
-            let info = vk::SamplerCreateInfo::builder()
-                /*
-                .mag_filter(vk::Filter::LINEAR)
-                .min_filter(vk::Filter::LINEAR)
-                */
-                .mag_filter(vk::Filter::NEAREST)
-                .min_filter(vk::Filter::NEAREST)
-                .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
-                .address_mode_u(vk::SamplerAddressMode::REPEAT)
-                .address_mode_v(vk::SamplerAddressMode::REPEAT)
-                .address_mode_w(vk::SamplerAddressMode::REPEAT)
-                .mip_lod_bias(0.0)
-                .anisotropy_enable(false)
-                .compare_enable(false)
-                .unnormalized_coordinates(false);
-            render.dev.create_sampler(&info, None).unwrap()
-        };
-
-        TextureSetBuilder {
-            render,
-            pool,
-            layout,
-            set,
-            sampler,
-            images: Vec::with_capacity(texture_count),
-            image_count: texture_count,
-            format,
-        }
-    }
-
-    pub fn layout(&self) -> vk::DescriptorSetLayout {
-        self.layout
-    }
-
-    pub fn set(&self) -> vk::DescriptorSet {
-        self.set
-    }
-}
-
-impl<'a> TextureSetBuilder<'a> {
-    pub fn push(mut self, dimensions: UVec2, reader: &mut dyn FnMut(&mut [u8])) -> Self {
-        assert!(self.images.len() < self.image_count);
-
-        let fmt = match self.format {
+        reader: &mut dyn FnMut(&mut [u8]),
+    ) -> Self {
+        let format = match format {
             TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
             TextureFormat::Gray8Unorm => vk::Format::R8_UNORM,
         };
 
-        let img = unsafe {
+        let image = unsafe {
             let info = vk::ImageCreateInfo::builder()
                 .image_type(vk::ImageType::TYPE_2D)
-                .format(fmt)
+                .format(format)
                 .extent(vk::Extent3D {
                     width: dimensions.x,
                     height: dimensions.y,
@@ -131,25 +54,31 @@ impl<'a> TextureSetBuilder<'a> {
                 usage: vk_mem::MemoryUsage::AutoPreferDevice,
                 ..Default::default()
             };
-            self.render.dev.alloc.create_image(&info, &c_info).unwrap()
+            render.dev.alloc.create_image(&info, &c_info).unwrap()
         };
 
         unsafe {
-            self.render.commands.transfer_to_image_with(
-                &self.render.dev,
-                img.0,
+            render.commands.transfer_to_image_with(
+                &render.dev,
+                image.0,
                 UVec3::ZERO,
                 reader,
                 UVec3::new(dimensions.x, dimensions.y, 1),
-                fmt,
+                format,
             );
         }
 
-        let view = unsafe {
+        Self { image, format }
+    }
+}
+
+impl TextureView {
+    pub fn new(render: &mut Render, texture: Shared<Texture>) -> Self {
+        let image_view = unsafe {
             let info = vk::ImageViewCreateInfo::builder()
-                .image(img.0)
+                .image(texture.image.0)
                 .view_type(vk::ImageViewType::TYPE_2D)
-                .format(fmt)
+                .format(texture.format)
                 .subresource_range(vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     base_mip_level: 0,
@@ -157,38 +86,19 @@ impl<'a> TextureSetBuilder<'a> {
                     base_array_layer: 0,
                     layer_count: 1,
                 });
-            self.render.dev.create_image_view(&info, None).unwrap()
+            render.dev.create_image_view(&info, None).unwrap()
         };
-
-        unsafe {
-            let info = [vk::DescriptorImageInfo {
-                sampler: self.sampler,
-                image_view: view,
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            }];
-            let writes = [vk::WriteDescriptorSet::builder()
-                .dst_set(self.set)
-                .dst_binding(0)
-                .dst_array_element(self.images.len().try_into().unwrap())
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&info)
-                .build()];
-            self.render.dev.update_descriptor_sets(&writes, &[]);
+        Self {
+            texture,
+            image_view,
         }
-
-        self.images.push((img, view));
-        self
     }
 
-    pub fn build(self) -> TextureSet {
-        assert_eq!(self.image_count, self.images.len());
-        TextureSet {
-            pool: self.pool,
-            layout: self.layout,
-            set: self.set,
-            sampler: self.sampler,
-            images: self.images.into(),
-            format: self.format,
+    pub fn bind_info(&self, sampler: vk::Sampler) -> vk::DescriptorImageInfo {
+        vk::DescriptorImageInfo {
+            sampler,
+            image_view: self.image_view,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         }
     }
 }
