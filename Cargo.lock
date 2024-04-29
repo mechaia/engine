@@ -999,6 +999,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mechaia_terrain"
+version = "0.1.0"
+dependencies = [
+ "mechaia_render",
+]
+
+[[package]]
 name = "mechaia_util"
 version = "0.1.0"
 dependencies = [
@@ -1723,10 +1730,6 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
-
-[[package]]
-name = "terrain"
-version = "0.1.0"
 
 [[package]]
 name = "thiserror"

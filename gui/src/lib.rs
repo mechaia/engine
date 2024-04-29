@@ -125,8 +125,6 @@ impl Gui {
             .map(|w| w.build())
             .collect::<Vec<_>>();
 
-        dbg!(h.as_u32(), writes.len());
-
         unsafe { render.dev_mut().update_descriptor_sets(&writes, &[]) };
     }
 }

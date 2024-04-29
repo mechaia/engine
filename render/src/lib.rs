@@ -16,7 +16,7 @@ use vk_mem::{Alloc, AllocatorCreateInfo};
 const TIMEOUT: u64 = 100_000_000;
 
 pub unsafe trait DropWith {
-    unsafe fn drop_with(self, dev: &Dev);
+    fn drop_with(self, dev: &mut Dev);
 }
 
 pub struct Dev {

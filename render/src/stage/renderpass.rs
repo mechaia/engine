@@ -1,6 +1,6 @@
 use super::{Stage, StageArgs};
 use crate::{Dev, VmaImage};
-use ash::vk::{self, AttachmentReference};
+use ash::vk;
 use core::mem;
 use vk_mem::Alloc;
 
@@ -48,7 +48,7 @@ struct RenderPassFramebuffer {
 }
 
 impl RenderPass {
-    pub fn builder(render: &mut crate::Render) -> RenderPassBuilder {
+    pub fn builder() -> RenderPassBuilder {
         RenderPassBuilder {
             attachments: Vec::new(),
             subpasses: Vec::new(),

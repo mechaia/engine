@@ -29,10 +29,10 @@ impl<T> Deref for Shared<T> {
 }
 
 unsafe impl<T: crate::DropWith> crate::DropWith for Shared<T> {
-    unsafe fn drop_with(self, dev: &crate::Dev) {
+    fn drop_with(self, dev: &mut crate::Dev) {
         let Ok(v) = Arc::try_unwrap(self.0) else {
             return;
         };
-        unsafe { v.drop_with(dev) };
+        v.drop_with(dev);
     }
 }

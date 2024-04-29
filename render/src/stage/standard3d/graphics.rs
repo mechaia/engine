@@ -1,7 +1,5 @@
 use crate::{
-    resource::mesh::MeshSet,
-    stage::renderpass::{RenderPassBuilder, RenderSubpassBuilder, SubpassAttachmentReferences},
-    Render, VmaBuffer,
+    resource::mesh::MeshSet, stage::renderpass::{RenderPassBuilder, RenderSubpassBuilder, SubpassAttachmentReferences}, DropWith, Render, VmaBuffer
 };
 use ash::vk;
 use core::{mem, ptr::NonNull};
@@ -63,7 +61,7 @@ impl Data {
     pub unsafe fn set_instance_data(
         &mut self,
         index: usize,
-        set_data: &[super::SetData],
+        set_data: &util::Arena<super::SetData>,
         mut instance_counts: &[u32],
         instance_data: &mut dyn Iterator<Item = super::Instance>,
     ) {
@@ -80,7 +78,7 @@ impl Data {
 
         let mut first_instance = 0;
 
-        for set in set_data.iter() {
+        for set in set_data.values() {
             let p = set.graphics.per_image[index]
                 .parameters_ptr
                 .cast::<u32>()
@@ -109,11 +107,13 @@ impl Data {
     }
 }
 
-impl SetData {
-    pub unsafe fn drop_with(self, dev: &mut crate::Dev) {
+unsafe impl DropWith for SetData {
+    fn drop_with(self, dev: &mut crate::Dev) {
         for mut pi in self.per_image.into_vec().drain(..) {
-            dev.unmap_buffer(&mut pi.parameters);
-            dev.free_buffer(pi.parameters);
+            unsafe {
+                dev.unmap_buffer(&mut pi.parameters);
+                dev.free_buffer(pi.parameters);
+            }
         }
     }
 }
@@ -385,7 +385,7 @@ unsafe impl crate::stage::renderpass::RenderSubpass for GraphicsSubpass {
 
         let pi_data = &shared.per_image[args.index];
 
-        for set in shared.set_data.iter() {
+        for set in shared.set_data.values() {
             dev.cmd_bind_vertex_buffers(
                 args.cmd,
                 0,

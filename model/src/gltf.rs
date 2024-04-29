@@ -15,7 +15,6 @@ struct Builder<'a> {
 
 #[derive(Debug)]
 struct Node {
-    transform: Transform,
     parent: usize,
 }
 
@@ -88,20 +87,8 @@ fn parse_node_tree(builder: &mut Builder<'_>, node: ::gltf::Node<'_>) -> (Transf
 
 /// Load all nodes so we have proper fucking backlinks
 fn load_nodes(gltf: &::gltf::Gltf) -> Vec<Node> {
-    let mut nodes = Vec::new();
-
     // fucking retarded garbage fucking format what the fucking fuck
-    for node in gltf.nodes() {
-        let (translation, rotation, scale) = node.transform().decomposed();
-        //assert_eq!(scale, [1.0; 3], "non-identity scale");
-        nodes.push(Node {
-            transform: Transform {
-                translation: Vec3::from_array(translation),
-                rotation: Quat::from_array(rotation),
-            },
-            parent: usize::MAX,
-        });
-    }
+    let mut nodes = gltf.nodes().map(|_| Node { parent: usize::MAX }).collect::<Vec<_>>();
 
     for node in gltf.nodes() {
         for child in node.children() {
@@ -209,8 +196,6 @@ impl Builder<'_> {
             return *i;
         }
 
-        let r = skin.reader(source_bin(self.bin));
-
         let armature = build_armature(self.gltf, &skin, &self.nodes);
 
         let mut outputs = (0..armature.bones.len())
@@ -314,16 +299,6 @@ fn collect_bones(armature: &mut Armature, nodes: &[Node], node: ::gltf::Node<'_>
     if let Some(i) = armature.joints.iter().position(|n| *n == node.index()) {
         armature.joint_index_to_bone[i] = start;
     }
-}
-
-fn repeat<T: Default>(count: usize) -> Vec<T> {
-    iter::repeat_with(T::default).take(count).collect()
-}
-
-fn repeat2<T: Clone>(count: usize, value: T) -> Vec<T> {
-    iter::repeat_with(move || value.clone())
-        .take(count)
-        .collect()
 }
 
 fn source_bin<'a>(bin: &'a [u8]) -> impl Fn(::gltf::Buffer<'_>) -> Option<&'a [u8]> + Clone + 'a {

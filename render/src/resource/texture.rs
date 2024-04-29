@@ -1,4 +1,4 @@
-use crate::{Render, VmaImage};
+use crate::{DropWith, Render, VmaImage};
 use ash::vk;
 use glam::{UVec2, UVec3};
 use vk_mem::Alloc;
@@ -72,6 +72,14 @@ impl Texture {
     }
 }
 
+unsafe impl DropWith for Texture {
+    fn drop_with(mut self, dev: &mut crate::Dev) {
+        unsafe {
+            dev.alloc.destroy_image(self.image.0, &mut self.image.1);
+        }
+    }
+}
+
 impl TextureView {
     pub fn new(render: &mut Render, texture: Shared<Texture>) -> Self {
         let image_view = unsafe {
@@ -100,5 +108,12 @@ impl TextureView {
             image_view: self.image_view,
             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         }
+    }
+}
+
+unsafe impl DropWith for TextureView {
+    fn drop_with(self, dev: &mut crate::Dev) {
+        unsafe { dev.destroy_image_view(self.image_view, None) };
+        self.texture.drop_with(dev);
     }
 }

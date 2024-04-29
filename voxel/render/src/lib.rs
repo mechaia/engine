@@ -74,6 +74,7 @@ impl VoxelRender {
         max_grids: u32,
         voxel_buffer_size: u64,
     ) -> Self {
+        todo!()
     }
 
     /// Reset grids list
@@ -101,6 +102,6 @@ impl VoxelRender {
             }
         }
 
-        let test = 
+        let test = todo!();
     }
 }

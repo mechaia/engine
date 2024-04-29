@@ -1,5 +1,4 @@
 use ash::vk;
-use core::mem;
 use glam::{U64Vec3, UVec3};
 use vk_mem::Alloc;
 

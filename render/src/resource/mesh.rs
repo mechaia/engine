@@ -157,16 +157,13 @@ impl MeshSet {
             index_count,
         }
     }
-
-    pub unsafe fn drop_with(mut self, alloc: &vk_mem::Allocator) {
-        alloc.free_memory(&mut self.index_data.1);
-        alloc.free_memory(&mut self.vertex_data.1);
-    }
 }
 
 unsafe impl crate::DropWith for MeshSet {
-    unsafe fn drop_with(mut self, dev: &crate::Dev) {
-        dev.alloc.free_memory(&mut self.index_data.1);
-        dev.alloc.free_memory(&mut self.vertex_data.1);
+    fn drop_with(mut self, dev: &mut crate::Dev) {
+        unsafe {
+            dev.alloc.free_memory(&mut self.index_data.1);
+            dev.alloc.free_memory(&mut self.vertex_data.1);
+        }
     }
 }

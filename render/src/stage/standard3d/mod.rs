@@ -25,7 +25,7 @@ use crate::resource::camera::{Camera, CameraView};
 use crate::resource::texture::TextureView;
 use crate::resource::Shared;
 use crate::resource::{material::pbr::PbrMaterialSet, mesh::MeshSet};
-use crate::{Render, VmaBuffer};
+use crate::{DropWith, Render, VmaBuffer};
 use ash::vk;
 use core::{ffi::CStr, mem, ptr::NonNull};
 use descriptor::Descriptors;
@@ -55,13 +55,16 @@ pub struct Configuration {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TextureHandle(util::ArenaHandle);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MeshSetHandle(util::ArenaHandle);
+
 type Data = Arc<Mutex<SharedData>>;
 
 struct SharedData {
     max_transform_count: u32,
     max_instance_count: u32,
     camera: Shared<Camera>,
-    set_data: Vec<SetData>,
+    set_data: util::Arena<SetData>,
     per_image: Box<[DataOne]>,
     descriptors: Descriptors,
     textures: util::Arena<Shared<TextureView>>,
@@ -158,7 +161,7 @@ impl Standard3D {
 
         assert_eq!(
             instances_counts.len(),
-            shared.set_data.iter().map(|v| v.mesh_set.len()).sum()
+            shared.set_data.values().map(|v| v.mesh_set.len()).sum()
         );
         assert!(instances_counts.iter().sum::<u32>() <= shared.max_instance_count);
 
@@ -174,10 +177,7 @@ impl Standard3D {
 
     pub fn set_directional_light(&mut self, index: usize, direction: Vec3, color: Vec3) {
         let mut sh = self.shared.lock().unwrap();
-        let pi = &mut sh.per_image[index];
-        // FIXME bro
-        let direction = Vec3::new(-1.0, 0.0, -1.0).normalize();
-        pi.directional_lights_data = DirectionalLight {
+        sh.per_image[index].directional_lights_data = DirectionalLight {
             direction,
             _padding_0: 0.0,
             color,
@@ -229,17 +229,24 @@ impl Standard3D {
 
         unsafe { render.dev.update_descriptor_sets(&writes, &[]) };
 
-        dbg!(h);
 
         TextureHandle(h)
     }
 
-    pub fn add_mesh_set(&mut self, render: &mut Render, mesh_set: Shared<MeshSet>) {
+    pub fn add_mesh_set(&mut self, render: &mut Render, mesh_set: Shared<MeshSet>) -> MeshSetHandle {
+        let graphics = graphics::SetData::new(render, &mesh_set);
         let mut shared = self.shared.lock().unwrap();
-        shared.set_data.push(SetData {
-            graphics: graphics::SetData::new(render, &mesh_set),
+        let h = shared.set_data.insert(SetData {
+            graphics,
             mesh_set,
         });
+        MeshSetHandle(h)
+    }
+
+    pub fn remove_mesh_set(&mut self, render: &mut Render, mesh_set: MeshSetHandle) {
+        let mut shared = self.shared.lock().unwrap();
+        let set_data = shared.set_data.remove(mesh_set.0).expect("no set with handle");
+        set_data.drop_with(&mut render.dev);
     }
 }
 
@@ -250,7 +257,7 @@ impl SharedData {
         material_set: Shared<PbrMaterialSet>,
         config: &Configuration,
     ) -> Self {
-        let descriptors = Descriptors::new(render, &camera, config);
+        let descriptors = Descriptors::new(render, config);
 
         let comp_data_transform_size = compute_data_size(config.max_transform_count);
         let gfx_data_transform_size = graphics_data_transform_size(config.max_transform_count);
@@ -393,12 +400,19 @@ impl SharedData {
             max_instance_count: config.max_instance_count,
             camera,
             per_image,
-            set_data: Vec::new(),
+            set_data: Default::default(),
             descriptors,
             textures: Default::default(),
             max_texture_count: config.max_texture_count,
             material_set,
         }
+    }
+}
+
+unsafe impl DropWith for SetData {
+    fn drop_with(self, dev: &mut crate::Dev) {
+        self.graphics.drop_with(dev);
+        self.mesh_set.drop_with(dev);
     }
 }
 

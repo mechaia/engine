@@ -2,7 +2,7 @@ struct GraphicsPass {
 }
 
 unsafe impl render::stage::renderpass::RenderSubpass for GraphicsPass {
-    unsafe fn record_commands(&self, dev: &ash::Device, args: &render::StageArgs) {
+    unsafe fn record_commands(&self, dev: &render::Dev, args: &render::StageArgs) {
         
     }
 

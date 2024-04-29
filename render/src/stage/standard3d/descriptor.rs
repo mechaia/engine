@@ -1,5 +1,6 @@
+use crate::DropWith;
+
 use super::Configuration;
-use crate::resource::camera::Camera;
 use ash::vk;
 
 pub(super) struct Descriptors {
@@ -11,7 +12,7 @@ pub(super) struct Descriptors {
 impl Descriptors {
     pub const BINDING_TEXTURES: u32 = 5;
 
-    pub fn new(render: &mut crate::Render, camera: &Camera, config: &Configuration) -> Self {
+    pub fn new(render: &mut crate::Render, config: &Configuration) -> Self {
         let layout = make_layout(&render.dev, config);
         let image_count = unsafe { render.swapchain.image_count() as u32 };
         let pool = make_pool(&render.dev, config, image_count);
@@ -28,6 +29,15 @@ impl Descriptors {
                 .unwrap()
         };
         Self { pool, sets, layout }
+    }
+}
+
+unsafe impl DropWith for Descriptors {
+    fn drop_with(self, dev: &mut crate::Dev) {
+        unsafe {
+            dev.destroy_descriptor_set_layout(self.layout, None);
+            dev.destroy_descriptor_pool(self.pool, None);
+        }
     }
 }
 
