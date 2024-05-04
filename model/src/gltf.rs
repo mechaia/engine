@@ -88,7 +88,10 @@ fn parse_node_tree(builder: &mut Builder<'_>, node: ::gltf::Node<'_>) -> (Transf
 /// Load all nodes so we have proper fucking backlinks
 fn load_nodes(gltf: &::gltf::Gltf) -> Vec<Node> {
     // fucking retarded garbage fucking format what the fucking fuck
-    let mut nodes = gltf.nodes().map(|_| Node { parent: usize::MAX }).collect::<Vec<_>>();
+    let mut nodes = gltf
+        .nodes()
+        .map(|_| Node { parent: usize::MAX })
+        .collect::<Vec<_>>();
 
     for node in gltf.nodes() {
         for child in node.children() {

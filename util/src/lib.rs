@@ -1,5 +1,11 @@
+#![feature(ptr_metadata, layout_for_ptr, wrapping_next_power_of_two)]
+
 pub mod bit;
+pub mod math;
 pub mod soa;
+pub mod sync;
+
+pub use num_complex::Complex32 as Complex;
 
 use core::{
     mem,
@@ -7,6 +13,19 @@ use core::{
     ops::{Index, IndexMut},
 };
 use glam::{Quat, Vec3};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Transform {
+    pub translation: Vec3,
+    pub rotation: Quat,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TransformScale {
+    pub translation: Vec3,
+    pub scale: f32,
+    pub rotation: Quat,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BitMap8(u8);
@@ -118,19 +137,6 @@ impl<T> Arena<T> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Transform {
-    pub translation: Vec3,
-    pub rotation: Quat,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct TransformScale {
-    pub translation: Vec3,
-    pub scale: f32,
-    pub rotation: Quat,
-}
-
 impl Transform {
     pub const IDENTITY: Self = Self {
         translation: Vec3::ZERO,
@@ -198,15 +204,16 @@ impl Transform {
     pub fn with_translation(&self, translation: Vec3) -> Self {
         Self {
             translation,
-            rotation: self.rotation,
+            ..*self
         }
     }
 
     pub fn with_rotation(&self, rotation: Quat) -> Self {
-        Self {
-            translation: self.translation,
-            rotation,
-        }
+        Self { rotation, ..*self }
+    }
+
+    pub fn with_scale(&self, scale: f32) -> TransformScale {
+        TransformScale::from(*self).with_scale(scale)
     }
 }
 
@@ -216,6 +223,28 @@ impl TransformScale {
         scale: 1.0,
         rotation: Quat::IDENTITY,
     };
+
+    pub fn with_translation(&self, translation: Vec3) -> Self {
+        Self {
+            translation,
+            ..*self
+        }
+    }
+
+    pub fn with_rotation(&self, rotation: Quat) -> Self {
+        Self { rotation, ..*self }
+    }
+
+    pub fn with_scale(&self, scale: f32) -> Self {
+        Self { scale, ..*self }
+    }
+
+    pub fn as_transform(&self) -> Transform {
+        Transform {
+            translation: self.translation,
+            rotation: self.rotation,
+        }
+    }
 }
 
 impl From<Transform> for TransformScale {

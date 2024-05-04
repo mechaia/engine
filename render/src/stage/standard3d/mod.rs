@@ -229,23 +229,26 @@ impl Standard3D {
 
         unsafe { render.dev.update_descriptor_sets(&writes, &[]) };
 
-
         TextureHandle(h)
     }
 
-    pub fn add_mesh_set(&mut self, render: &mut Render, mesh_set: Shared<MeshSet>) -> MeshSetHandle {
+    pub fn add_mesh_set(
+        &mut self,
+        render: &mut Render,
+        mesh_set: Shared<MeshSet>,
+    ) -> MeshSetHandle {
         let graphics = graphics::SetData::new(render, &mesh_set);
         let mut shared = self.shared.lock().unwrap();
-        let h = shared.set_data.insert(SetData {
-            graphics,
-            mesh_set,
-        });
+        let h = shared.set_data.insert(SetData { graphics, mesh_set });
         MeshSetHandle(h)
     }
 
     pub fn remove_mesh_set(&mut self, render: &mut Render, mesh_set: MeshSetHandle) {
         let mut shared = self.shared.lock().unwrap();
-        let set_data = shared.set_data.remove(mesh_set.0).expect("no set with handle");
+        let set_data = shared
+            .set_data
+            .remove(mesh_set.0)
+            .expect("no set with handle");
         set_data.drop_with(&mut render.dev);
     }
 }

@@ -13,3 +13,5 @@ pub mod voxel {
 }
 //#[cfg(feature = "dep:input")]
 pub use input;
+#[cfg(feature = "sound")]
+pub use sound;

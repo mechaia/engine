@@ -8,7 +8,7 @@ physics3d = { path = "../physics3d", package = "mechaia_physics3d" }
 render = { path = "../render", package = "mechaia_render", optional = true }
 window = { path = "../window", package = "mechaia_window", optional = true }
 gui = { path = "../gui", package = "mechaia_gui", optional = true }
-sound = { path = "../sound", package = "mechaia_sound" }
+sound = { path = "../sound", package = "mechaia_sound", optional = true }
 util = { path = "../util", package = "mechaia_util" }
 model = { path = "../model", package = "mechaia_model" }
 voxel_common = { path = "../voxel/common", package = "mechaia_voxel_common", optional = true }
@@ -18,7 +18,8 @@ glam = "0.27.0"
 
 [features]
 default = ["client"]
-client = ["render", "dep:input"]
+client = ["render", "sound", "dep:input"]
 render = ["dep:render", "dep:gui", "dep:window"]
+sound = ["dep:sound"]
 voxel = ["dep:voxel_common"]
 voxel_render = ["dep:voxel_render"]

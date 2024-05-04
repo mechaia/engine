@@ -35,19 +35,20 @@
 
 use glam::{Quat, U64Vec3, UVec3, Vec3};
 use render::stage::renderpass::RenderPassBuilder;
-use util::{bit::{BitBox, BitVec}, Transform};
+use util::{
+    bit::{BitBox, BitVec},
+    Transform,
+};
 
 mod compute;
 mod graphics;
 
-pub struct VoxelRender {
-    
-}
+pub struct VoxelRender {}
 
 enum Axis {
     X,
     Y,
-    Z
+    Z,
 }
 
 enum Direction {
@@ -81,8 +82,14 @@ impl VoxelRender {
     pub fn reset(&mut self, index: usize) {}
 
     /// Push a grid to render
-    pub fn push<F>(&mut self, index: usize, transform: &Transform, size: UVec3, edges_occluded: bool, query: F)
-    where
+    pub fn push<F>(
+        &mut self,
+        index: usize,
+        transform: &Transform,
+        size: UVec3,
+        edges_occluded: bool,
+        query: F,
+    ) where
         F: Fn(UVec3) -> Option<Voxel>,
     {
         // TODO this is obviously inefficient, though it might be efficient if we'd push it directly

@@ -1,12 +1,7 @@
-struct GraphicsPass {
-}
+struct GraphicsPass {}
 
 unsafe impl render::stage::renderpass::RenderSubpass for GraphicsPass {
-    unsafe fn record_commands(&self, dev: &render::Dev, args: &render::StageArgs) {
-        
-    }
+    unsafe fn record_commands(&self, dev: &render::Dev, args: &render::StageArgs) {}
 
-    unsafe fn rebuild_swapchain(&mut self, dev: &mut render::Dev, swapchain: &render::SwapChain) {
-        
-    }
+    unsafe fn rebuild_swapchain(&mut self, dev: &mut render::Dev, swapchain: &render::SwapChain) {}
 }

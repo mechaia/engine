@@ -38,6 +38,10 @@ impl<'a, R: Raw> Slice<'a, R> {
     pub fn len(&self) -> usize {
         self.len
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = R::ElementRef<'_>> {
+        (0..self.len).map(move |i| unsafe { self.raw.get_unchecked(i) })
+    }
 }
 
 impl<R: Raw> Vec<R> {
@@ -71,7 +75,9 @@ impl<R: Raw> Vec<R> {
         unsafe { self.raw.as_slices_mut(self.len) }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = R::ElementRef<'_>> {
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<Item = R::ElementRef<'_>> + ExactSizeIterator + DoubleEndedIterator {
         (0..self.len).map(move |i| unsafe { self.raw.get_unchecked(i) })
     }
 
@@ -166,6 +172,12 @@ impl<R: Raw> FromIterator<R::Element> for Vec<R> {
         let mut slf = Self::with_capacity(iter.size_hint().0);
         iter.for_each(|v| slf.push(v));
         slf
+    }
+}
+
+impl<const N: usize, R: Raw> From<[R::Element; N]> for Vec<R> {
+    fn from(value: [R::Element; N]) -> Self {
+        Self::from_iter(value)
     }
 }
 
