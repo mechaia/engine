@@ -6,6 +6,7 @@ pub mod soa;
 pub mod sync;
 
 pub use num_complex::Complex32 as Complex;
+pub use rand;
 
 use core::{
     mem,
@@ -166,10 +167,25 @@ impl Transform {
         self.rotation.inverse() * direction
     }
 
+    pub fn apply_to_rotation(&self, rotation: Quat) -> Quat {
+        self.rotation * rotation
+    }
+
+    pub fn apply_to_rotation_inv(&self, rotation: Quat) -> Quat {
+        self.rotation.inverse() * rotation
+    }
+
     pub fn apply_to_transform(&self, transform: &Self) -> Self {
         Self {
-            translation: self.translation + self.rotation * transform.translation,
-            rotation: self.rotation * transform.rotation,
+            translation: self.apply_to_translation(transform.translation),
+            rotation: self.apply_to_rotation(transform.rotation),
+        }
+    }
+
+    pub fn apply_to_transform_inv(&self, transform: &Self) -> Self {
+        Self {
+            translation: self.apply_to_translation_inv(transform.translation),
+            rotation: self.apply_to_rotation_inv(transform.rotation),
         }
     }
 
@@ -186,6 +202,13 @@ impl Transform {
         Self {
             rotation,
             translation,
+        }
+    }
+
+    pub fn lerp(&self, to: &Self, t: f32) -> Self {
+        Self {
+            rotation: self.rotation.lerp(to.rotation, t),
+            translation: self.translation.lerp(to.translation, t),
         }
     }
 

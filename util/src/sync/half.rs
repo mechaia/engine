@@ -91,7 +91,7 @@ pub fn half_default<T: Default>() -> (Half<Left, T>, Half<Right, T>) {
 }
 
 pub fn half_with<T, F: FnOnce() -> T>(f: F) -> (Half<Left, T>, Half<Right, T>) {
-    todo!()
+    unsafe { half_init_with((), |p: *mut T| p.write(f())) }
 }
 
 pub fn half_uninit<T>() -> (

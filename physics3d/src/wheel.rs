@@ -21,6 +21,7 @@ struct WheelInstance {
     angle: f32,
     torque: f32,
     brake: f32,
+    angular_velocity: f32,
 }
 
 struct WheelSuspensionInstance {
@@ -63,6 +64,7 @@ impl VehicleBody {
             angle: 0.0,
             torque: 0.0,
             brake: 0.0,
+            angular_velocity: 0.0,
         });
         WheelHandle(h)
     }
@@ -81,6 +83,10 @@ impl VehicleBody {
 
     pub fn set_wheel_brake(&mut self, wheel: WheelHandle, brake: f32) {
         self.wheels[wheel.0].brake = brake;
+    }
+
+    pub fn wheel_angular_velocity(&self, wheel: WheelHandle) -> f32 {
+        self.wheels[wheel.0].angular_velocity
     }
 
     /// Returns transform for axle and tire.
@@ -168,8 +174,7 @@ impl VehicleBody {
         let mass_per_wheel = mass / self.wheels.len() as f32;
 
         for (w, n) in self.wheels.values_mut().zip(now) {
-            let Some(res) = n.ray else { continue };
-            if res.distance <= n.len {
+            if let Some(res) = n.ray.filter(|ray| ray.distance <= n.len) {
                 let point = n.pos + n.dir * res.distance;
 
                 let trf_l = Transform {
@@ -215,8 +220,13 @@ impl VehicleBody {
                 if angular_velocity.is_nan() {
                     dbg!(vehicle_along, velocity_at_point, w.radius, point);
                 }
-                w.rotation -= angular_velocity * dt;
+
+                w.angular_velocity = angular_velocity;
+            } else {
+                // TODO should probably be mass based?
+                w.angular_velocity *= 1.0 - w.brake;
             }
+            w.rotation -= w.angular_velocity * dt;
         }
     }
 }

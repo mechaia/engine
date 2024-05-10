@@ -1,6 +1,10 @@
 use {
     super::U0d32,
-    core::{fmt, ops}, rand::{distributions::uniform::{SampleBorrow, SampleUniform, UniformInt, UniformSampler}, Rng},
+    core::{fmt, ops},
+    rand::{
+        distributions::{uniform::{SampleBorrow, SampleUniform, UniformInt, UniformSampler}, Distribution, Standard},
+        Rng,
+    },
 };
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -173,20 +177,22 @@ impl UniformSampler for U32d32Sampler {
     type X = U32d32;
 
     fn new<B1, B2>(low: B1, high: B2) -> Self
-        where
-            B1: SampleBorrow<Self::X> + Sized,
-            B2: SampleBorrow<Self::X> + Sized {
+    where
+        B1: SampleBorrow<Self::X> + Sized,
+        B2: SampleBorrow<Self::X> + Sized,
+    {
         Self {
-            sampler: UniformInt::new(low.borrow().0, high.borrow().0)
+            sampler: UniformInt::new(low.borrow().0, high.borrow().0),
         }
     }
 
     fn new_inclusive<B1, B2>(low: B1, high: B2) -> Self
-        where
-            B1: SampleBorrow<Self::X> + Sized,
-            B2: SampleBorrow<Self::X> + Sized {
+    where
+        B1: SampleBorrow<Self::X> + Sized,
+        B2: SampleBorrow<Self::X> + Sized,
+    {
         Self {
-            sampler: UniformInt::new(low.borrow().0, high.borrow().0)
+            sampler: UniformInt::new(low.borrow().0, high.borrow().0),
         }
     }
 
@@ -195,16 +201,32 @@ impl UniformSampler for U32d32Sampler {
     }
 
     fn sample_single<R: Rng + ?Sized, B1, B2>(low: B1, high: B2, rng: &mut R) -> Self::X
-        where
-            B1: SampleBorrow<Self::X> + Sized,
-            B2: SampleBorrow<Self::X> + Sized, {
-        U32d32(UniformInt::<u64>::sample_single(low.borrow().0, high.borrow().0, rng))
+    where
+        B1: SampleBorrow<Self::X> + Sized,
+        B2: SampleBorrow<Self::X> + Sized,
+    {
+        U32d32(UniformInt::<u64>::sample_single(
+            low.borrow().0,
+            high.borrow().0,
+            rng,
+        ))
     }
 
-    fn sample_single_inclusive<R: Rng + ?Sized, B1, B2>(low: B1, high: B2, rng: &mut R)
-            -> Self::X
-            where B1: SampleBorrow<Self::X> + Sized,
-                  B2: SampleBorrow<Self::X> + Sized {
-        U32d32(UniformInt::<u64>::sample_single_inclusive(low.borrow().0, high.borrow().0, rng))
+    fn sample_single_inclusive<R: Rng + ?Sized, B1, B2>(low: B1, high: B2, rng: &mut R) -> Self::X
+    where
+        B1: SampleBorrow<Self::X> + Sized,
+        B2: SampleBorrow<Self::X> + Sized,
+    {
+        U32d32(UniformInt::<u64>::sample_single_inclusive(
+            low.borrow().0,
+            high.borrow().0,
+            rng,
+        ))
+    }
+}
+
+impl Distribution<U0d32> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> U0d32 {
+        U0d32(rng.gen())
     }
 }

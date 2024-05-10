@@ -1,4 +1,4 @@
-mod half;
+pub mod half;
 pub mod spsc;
 
 use core::sync::atomic;

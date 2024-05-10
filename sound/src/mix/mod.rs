@@ -1,8 +1,11 @@
+/*
 pub mod envelope;
 pub mod filter;
 pub mod transform;
+*/
 pub mod wave;
 
+/*
 use crate::Source;
 use glam::Vec3;
 use util::{
@@ -114,11 +117,13 @@ impl<S: Source> Source for LimitDuration<S> {
         self.time <= self.max_duration && self.source.next_sample(dt)
     }
 }
+*/
 
 pub fn lerp(x: f32, y: f32, t: f32) -> f32 {
     x + ((y - x) * t)
 }
 
+/*
 pub fn neg_exp(t: U32d32) -> f32 {
     (-t.to_f32()).exp()
 }
@@ -130,3 +135,4 @@ pub fn limit_duration<S>(source: S, max_duration: U32d32) -> LimitDuration<S> {
         max_duration,
     }
 }
+*/

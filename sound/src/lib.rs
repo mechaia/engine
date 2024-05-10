@@ -1,25 +1,26 @@
-//pub mod mix;
+pub mod mix;
 
 use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait}, BufferSize, Sample, SampleRate, SupportedStreamConfigRange
+    traits::{DeviceTrait, HostTrait, StreamTrait},
+    Sample, SampleRate, SupportedBufferSize, SupportedStreamConfigRange,
 };
 use std::{io, num::NonZeroUsize, sync::Arc};
 use symphonia::{
     core::{
-        audio::{AudioBuffer, AudioBufferRef, Channels, Signal}, codecs::Decoder, conv::FromSample, formats::{FormatOptions, FormatReader}, io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions}, meta::MetadataOptions, sample::Sample as SymSample
+        audio::{AudioBuffer, AudioBufferRef, Channels, Signal},
+        codecs::Decoder,
+        conv::FromSample,
+        formats::{FormatOptions, FormatReader},
+        io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions},
+        meta::MetadataOptions,
+        sample::Sample as SymSample,
     },
     default::{get_codecs, get_probe},
 };
 use util::math::fixed::{U0d32, U32d32};
 use util::sync::spsc;
 
-pub trait Source {
-    fn channels(&self) -> u16;
-
-    fn next_samples(&mut self, dt: U32d32, buffer: &mut Vec<f32>, count: usize) -> bool;
-}
-
-pub struct Dev<T> {
+pub struct Dev {
     host: cpal::Host,
     device: cpal::Device,
     stream: cpal::Stream,
@@ -28,8 +29,14 @@ pub struct Dev<T> {
 
 pub struct DevConfig {
     pub channels: u16,
-    pub preferred_sample_rate: u32,
-    pub max_latency: u32,
+    pub sample_rate: u32,
+    pub buffer_size: BufferSize,
+}
+
+pub enum BufferSize {
+    Default,
+    Fixed(u32),
+    MaxLatency(U0d32),
 }
 
 pub struct AudioData {
@@ -38,8 +45,11 @@ pub struct AudioData {
     ticker: U32d32,
 }
 
-impl<T: Send + Source> Dev<T> {
-    pub fn new(config: &DevConfig, shared: T) -> Self {
+impl Dev {
+    pub fn new<R: Send + FnMut(&mut [f32], u16, U0d32) + 'static>(
+        config: &DevConfig,
+        mut reader: R,
+    ) -> Self {
         let host = cpal::default_host();
 
         let device = host
@@ -50,23 +60,21 @@ impl<T: Send + Source> Dev<T> {
             .supported_output_configs()
             .expect("error while querying configs");
 
-        let cfg = {
+        let supported_cfg = {
             let f = |range: SupportedStreamConfigRange| {
-                if config.preferred_sample_rate < range.min_sample_rate().0 {
+                if config.sample_rate < range.min_sample_rate().0 {
                     range.with_sample_rate(range.min_sample_rate())
-                } else if config.preferred_sample_rate < range.max_sample_rate().0 {
-                    range.with_sample_rate(SampleRate(config.preferred_sample_rate))
+                } else if config.sample_rate < range.max_sample_rate().0 {
+                    range.with_sample_rate(SampleRate(config.sample_rate))
                 } else {
                     range.with_max_sample_rate()
                 }
             };
 
-            let mut cfg = f(supported_configs_ranges
-                .next()
-                .unwrap());
+            let mut cfg = f(supported_configs_ranges.next().unwrap());
 
             for range in supported_configs_ranges {
-                if cfg.channels() == config.channels && cfg.sample_rate().0 == config.preferred_sample_rate {
+                if cfg.channels() == config.channels && cfg.sample_rate().0 == config.sample_rate {
                     break;
                 }
                 if config.channels != range.channels() && config.channels == cfg.channels() {
@@ -78,33 +86,43 @@ impl<T: Send + Source> Dev<T> {
             cfg
         };
 
-        let mut cfg = cfg.config();
-        //cfg.buffer_size = BufferSize::Fixed(512);
-        // aim for roughly 5ms
-        // https://gamedev.stackexchange.com/a/125293
-        // https://gdcvault.com/play/1017877/The-Audio-Callback-for-Audio
-        // TODO make user configurable
-        cfg.buffer_size = BufferSize::Fixed(());
+        let buffer_size = 'buffer_size: {
+            match supported_cfg.buffer_size() {
+                &SupportedBufferSize::Range { min, max } => {
+                    let n = match config.buffer_size {
+                        BufferSize::Default => break 'buffer_size cpal::BufferSize::Default,
+                        BufferSize::Fixed(n) => n,
+                        BufferSize::MaxLatency(x) => {
+                            (U32d32::from(x) * supported_cfg.sample_rate().0).int()
+                        }
+                    };
+                    #[cfg(target_os = "linux")]
+                    if host.id() == cpal::HostId::Alsa {
+                        // fix retardedness
+                        let n = n.next_power_of_two();
+                        dbg!(n);
+                        break 'buffer_size cpal::BufferSize::Fixed(n.clamp(min, max));
+                    }
+                    cpal::BufferSize::Fixed(n.clamp(min, max))
+                }
+                SupportedBufferSize::Unknown => cpal::BufferSize::Default,
+            }
+        };
+
+        let mut cfg = supported_cfg.config();
+        cfg.buffer_size = buffer_size;
+
+        let channel_count = cfg.channels;
+
+        let dt = (U32d32::ONE / cfg.sample_rate.0).frac();
 
         let err_fn = move |err| eprintln!("an error occurred on the output audio stream: {}", err);
-
-        let (send, mut recv) = spsc::fixed(config.buffer_size);
-
-        let mut last = 0.0;
 
         let stream = device
             .build_output_stream(
                 &cfg,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    let l = recv.recv_into(data);
-                    if l > 0 {
-                        last = data[l - 1];
-                    }
-                    // TODO log a warning if not all data got written
-                    if l != data.len() {
-                        //dbg!(data.len(), l);
-                    }
-                    data[l..].fill(last);
+                move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                    reader(data, channel_count, dt)
                 },
                 err_fn,
                 None,
@@ -116,7 +134,6 @@ impl<T: Send + Source> Dev<T> {
             device,
             stream,
             config: cfg,
-            send,
         }
     }
 
@@ -145,48 +162,6 @@ impl<T: Send + Source> Dev<T> {
     /// Audio channels
     pub fn channels(&self) -> u16 {
         self.config.channels
-    }
-
-    pub fn feed_one(&mut self, sample: f32) -> bool {
-        self.send.send(sample).is_none()
-    }
-
-    /// Returns the amount of samples fed.
-    pub fn feed_interleaved(&mut self, samples: &[f32]) -> usize {
-        self.send.send_iter(samples.iter().copied())
-    }
-
-    /// Returns the amount of samples fed.
-    pub fn feed_2d(&mut self, samples: &[&[f32]]) -> usize {
-        let ch = usize::from(self.channels());
-        assert_eq!(samples.len(), ch);
-        assert!(samples.windows(2).all(|v| v[0].len() == v[1].len()));
-
-        let it = (0..samples[0].len()).flat_map(|i| samples.iter().map(move |v| v[i]));
-
-        self.send.send_iter(it)
-    }
-
-    /// Check whether the sample buffer is empty.
-    pub fn is_empty(&self) -> bool {
-        self.send.filled() == 0
-    }
-
-    /// Check whether the sample buffer is full.
-    pub fn is_full(&self) -> bool {
-        self.send.free() == 0
-    }
-
-    pub fn filled(&self) -> usize {
-        self.send.filled()
-    }
-
-    pub fn free(&self) -> usize {
-        self.send.free()
-    }
-
-    pub fn size(&self) -> NonZeroUsize {
-        self.send.size()
     }
 }
 
@@ -218,6 +193,10 @@ impl AudioData {
         }
     }
 
+    pub fn channels(&self) -> u16 {
+        self.decoder.last_decoded().spec().channels.count() as _
+    }
+
     /// Returns `false` if at end of stream.
     fn take(&mut self, buf: &mut Vec<f32>, mut count: usize, dt: U32d32) -> bool {
         macro_rules! each {
@@ -235,7 +214,9 @@ impl AudioData {
                     Ok(p) => p,
                     Err(symphonia::core::errors::Error::IoError(e))
                         if e.kind() == io::ErrorKind::UnexpectedEof =>
-                        return false,
+                    {
+                        return false
+                    }
                     Err(e) => todo!("{e}"),
                 };
                 self.decoder.decode(&packet).unwrap();
@@ -246,7 +227,13 @@ impl AudioData {
 
     /// Returns `false` if out of frames.
     /// Rewinds ticker when out of frames.
-    fn take_ref<T: SymSample>(ticker: &mut U32d32, from: &AudioBuffer<T>, to: &mut Vec<f32>, max_count: usize, dt: U32d32) -> (usize, bool)
+    fn take_ref<T: SymSample>(
+        ticker: &mut U32d32,
+        from: &AudioBuffer<T>,
+        to: &mut Vec<f32>,
+        max_count: usize,
+        dt: U32d32,
+    ) -> (usize, bool)
     where
         f32: FromSample<T>,
     {
@@ -262,7 +249,9 @@ impl AudioData {
             }
 
             for k in 0..channels {
-                to.push(<f32 as FromSample<T>>::from_sample(from.chan(k)[ticker.int() as usize]));
+                to.push(<f32 as FromSample<T>>::from_sample(
+                    from.chan(k)[ticker.int() as usize],
+                ));
             }
 
             *ticker += dt;
@@ -270,15 +259,59 @@ impl AudioData {
 
         ((to.len() - og_len) / channels, true)
     }
-}
 
-impl Source for AudioData {
-    fn channels(&self) -> u16 {
-        self.decoder.last_decoded().spec().channels.count() as _
+    /// Returns `false` if at end of stream.
+    pub fn take_one(&mut self, dt: U32d32, out: &mut [f32]) -> bool {
+        macro_rules! each {
+            ($($ty:ident)*) => {
+                match self.decoder.last_decoded() {
+                    $(AudioBufferRef::$ty(b) => Self::take_one_ref(&mut self.ticker, &*b, dt, out),)*
+                }
+            };
+        }
+        while !each!(U8 U16 U24 U32 S8 S16 S24 S32 F32 F64) {
+            let packet = match self.format.next_packet() {
+                Ok(p) => p,
+                Err(symphonia::core::errors::Error::IoError(e))
+                    if e.kind() == io::ErrorKind::UnexpectedEof =>
+                {
+                    return false
+                }
+                Err(e) => todo!("{e}"),
+            };
+            self.decoder.decode(&packet).unwrap();
+        }
+        true
     }
 
-    fn next_samples(&mut self, dt: U32d32, buffer: &mut Vec<f32>, count: usize) -> bool {
-        self.take(buffer, count, dt)
+    /// Returns `false` if out of frames.
+    /// Rewinds ticker when out of frames.
+    fn take_one_ref<T: SymSample>(
+        ticker: &mut U32d32,
+        from: &AudioBuffer<T>,
+        dt: U32d32,
+        out: &mut [f32],
+    ) -> bool
+    where
+        f32: FromSample<T>,
+    {
+        let dt = dt * from.spec().rate;
+        let channels = from.spec().channels.count();
+
+        assert_eq!(out.len(), channels, "channel count mismatch");
+
+        if ticker.int() as usize >= from.frames() {
+            *ticker -= U32d32::from(from.frames() as u32);
+            return false;
+        }
+
+        for (i, w) in out.iter_mut().enumerate() {
+            *w = <f32 as FromSample<T>>::from_sample(from.chan(i)[ticker.int() as usize]);
+        }
+
+        *ticker += dt;
+
+        true
     }
 }
 
@@ -298,8 +331,8 @@ fn make_source(data: Arc<Box<[u8]>>) -> MediaSourceStream {
 
 #[cfg(test)]
 mod test {
-    use util::soa::{Vec2, Vec3};
     use super::*;
+    use util::soa::{Vec2, Vec3};
 
     /*
     #[test]
@@ -507,15 +540,40 @@ mod test {
 
     #[test]
     fn play() {
-        let mut s = Dev::new(&DevConfig {
-            buffer_size: (1 << 20).try_into().unwrap(),
-            channels: 2,
-            preferred_sample_rate: 48000,
-        });
-        dbg!(s.sample_rate(), s.channels());
-        s.play();
+        let wait = std::sync::Arc::new(std::sync::Condvar::new());
+        let wait2 = wait.clone();
 
         let mut stream = AudioData::new(Arc::new(include_bytes!("/tmp/test.ogg").to_vec().into()));
+
+        let f = move |buf: &mut [f32], channels: u16, dt: U0d32| {
+            let mut it = buf.chunks_mut(usize::from(channels));
+            for b in &mut it {
+                if !stream.take_one(dt.into(), b) {
+                    it.for_each(|b| b.fill(0.0));
+                    wait2.notify_all();
+                    break;
+                }
+            }
+        };
+
+        let mut s = Dev::new(
+            &DevConfig {
+                //buffer_size: BufferSize::MaxLatency(U0d32::MAX / 200), // 5ms
+                buffer_size: BufferSize::MaxLatency(U0d32::MAX / 100), // 10ms
+                channels: 2,
+                //sample_rate: 48000,
+                sample_rate: 48000,
+            },
+            f,
+        );
+        s.play();
+
+        let stub = std::sync::Mutex::new(());
+        drop(wait.wait(stub.lock().unwrap()).unwrap());
+
+        s.pause();
+
+        /*
 
         let mut buf = Vec::new();
         while stream.next_samples(s.frame_time(), &mut buf, 1) {
@@ -532,5 +590,6 @@ mod test {
             std::thread::sleep_ms(10);
         }
         std::thread::sleep_ms(100);
+        */
     }
 }

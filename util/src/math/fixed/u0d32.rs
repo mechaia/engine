@@ -1,15 +1,24 @@
 use {
     super::U32d32,
-    core::{fmt, ops},
+    core::{fmt, num::Wrapping, ops},
+    rand::{
+        distributions::uniform::{SampleBorrow, SampleUniform, UniformInt, UniformSampler},
+        Rng,
+    },
 };
 
 /// Range [0;1[
 #[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct U0d32(pub u32);
 
+pub struct U0d32Sampler {
+    sampler: UniformInt<u32>,
+}
+
 impl U0d32 {
     pub const ZERO: Self = Self(0);
     pub const HALF: Self = Self(1u32 << 31);
+    pub const FRAC_1_4: Self = Self(1u32 << 30);
     pub const MIN: Self = Self(0);
     pub const MAX: Self = Self(u32::MAX);
     pub const EPSILON: Self = Self(1);
@@ -56,6 +65,10 @@ impl U0d32 {
 
     pub fn wrapping_mul_u32(self, rhs: u32) -> Self {
         Self(self.0.wrapping_mul(rhs))
+    }
+
+    pub fn saturating_sub(self, rhs: U0d32) -> Self {
+        Self(self.0.saturating_sub(rhs.0))
     }
 }
 
@@ -145,6 +158,20 @@ impl ops::Div<U32d32> for U0d32 {
     }
 }
 
+impl ops::Add<U0d32> for Wrapping<U0d32> {
+    type Output = Self;
+
+    fn add(self, rhs: U0d32) -> Self::Output {
+        Self(self.0.wrapping_add(rhs))
+    }
+}
+
+impl ops::AddAssign<U0d32> for Wrapping<U0d32> {
+    fn add_assign(&mut self, rhs: U0d32) {
+        *self = *self + rhs;
+    }
+}
+
 impl fmt::Debug for U0d32 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         U32d32::from(*self).fmt(f)
@@ -154,5 +181,61 @@ impl fmt::Debug for U0d32 {
 impl fmt::Display for U0d32 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         U32d32::from(*self).fmt(f)
+    }
+}
+
+impl SampleUniform for U0d32 {
+    type Sampler = U0d32Sampler;
+}
+
+impl UniformSampler for U0d32Sampler {
+    type X = U0d32;
+
+    fn new<B1, B2>(low: B1, high: B2) -> Self
+    where
+        B1: SampleBorrow<Self::X> + Sized,
+        B2: SampleBorrow<Self::X> + Sized,
+    {
+        Self {
+            sampler: UniformInt::new(low.borrow().0, high.borrow().0),
+        }
+    }
+
+    fn new_inclusive<B1, B2>(low: B1, high: B2) -> Self
+    where
+        B1: SampleBorrow<Self::X> + Sized,
+        B2: SampleBorrow<Self::X> + Sized,
+    {
+        Self {
+            sampler: UniformInt::new(low.borrow().0, high.borrow().0),
+        }
+    }
+
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Self::X {
+        U0d32(self.sampler.sample(rng))
+    }
+
+    fn sample_single<R: Rng + ?Sized, B1, B2>(low: B1, high: B2, rng: &mut R) -> Self::X
+    where
+        B1: SampleBorrow<Self::X> + Sized,
+        B2: SampleBorrow<Self::X> + Sized,
+    {
+        U0d32(UniformInt::<u32>::sample_single(
+            low.borrow().0,
+            high.borrow().0,
+            rng,
+        ))
+    }
+
+    fn sample_single_inclusive<R: Rng + ?Sized, B1, B2>(low: B1, high: B2, rng: &mut R) -> Self::X
+    where
+        B1: SampleBorrow<Self::X> + Sized,
+        B2: SampleBorrow<Self::X> + Sized,
+    {
+        U0d32(UniformInt::<u32>::sample_single_inclusive(
+            low.borrow().0,
+            high.borrow().0,
+            rng,
+        ))
     }
 }
