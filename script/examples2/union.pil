@@ -1,0 +1,49 @@
+% T A B C
+
+$ t T t
+$ b Integer_32
+$ c_string Const
+$ c_length Integer_32
+
+> f
+| format_clear
+| f_switch
+= write_newline
+
+? f_switch t
+~ A f_a
+~ B f_b
+~ C f_c
+!
+
+> f_a 
+| write_char_value 'a'
+= write_char
+
+> f_b 
+. write_character_value 'b'
+| write_character
+| f_arrow
+. write_integer_value b
+= write_integer
+
+> f_c
+. write_character_value 'c'
+| write_character
+| f_arrow
+. write_const_value c
+. write_const_length 4
+= write_const
+
+> f_arrow
+. write_const_value " -> "
+. write_const_length 4
+= write_const
+
+> start
+. t A
+| f
+. t B
+| f
+. t C
+= f

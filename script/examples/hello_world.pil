@@ -1,0 +1,10 @@
+import {
+    Env
+    write_stdout
+}
+
+export function main(Env env) {
+    (Env) {
+        write_stdout(env, "Hello, world!")
+    }
+}

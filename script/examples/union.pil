@@ -1,0 +1,30 @@
+import {
+    Env
+}
+
+data T {
+    A
+    B
+    C
+}
+
+function f(T x) -> () {
+    (A) {
+        debug "a -> ", x
+    }
+    (B) {
+        debug "b -> ", x
+    }
+    (C) {
+        debug "c -> ", x
+    }
+}
+
+export function main(Env _) -> () {
+    (Env) {
+        f(A) -> ()
+        f(B) -> ()
+        f(C) -> ()
+        @ ()
+    }
+}

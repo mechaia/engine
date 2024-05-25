@@ -1,0 +1,5 @@
+> main
+. write_const_value "Hello, world!"
+. write_const_length 10
+| write_const
+= write_newline
