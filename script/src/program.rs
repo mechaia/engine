@@ -1,329 +1,293 @@
-use crate::{function::{ArgMode, Statement, Value}, Collection, Map, Record, Str};
+use crate::{BuiltinFunction, BuiltinRegister, BuiltinType, Collection, Error, Map, Str};
 
 #[derive(Debug)]
 pub struct Program {
-    functions: Box<[Box<[Function]>]>,
-    constants: Box<[Box<[u8]>]>,
+    pub(crate) constants: Box<[Constant]>,
+    pub(crate) registers: Box<[Register]>,
+    pub(crate) functions: Box<[Function]>,
+    pub(crate) strings_buffer: Box<[u8]>,
+    pub(crate) entry: u32,
 }
 
 #[derive(Debug)]
-pub struct Error;
-
-#[derive(Debug)]
-pub struct Debug<'a> {
-    type_names: Vec<&'a Str>,
-    function_names: Vec<&'a Str>,
+pub struct Constant {
+    pub value: Box<[u8]>,
 }
 
 #[derive(Debug)]
+pub struct Register {
+    pub bits: u32,
+    pub builtin: Option<BuiltinRegister>,
+}
+
+#[derive(Debug)]
+pub(crate) struct Function(pub Box<[Instruction]>);
+
+#[derive(Debug, Default)]
 struct ProgramBuilder<'a> {
-    collection: &'a Collection,
     types_to_index: Map<&'a Str, u32>,
     types: Vec<Type<'a>>,
     function_to_index: Map<&'a Str, u32>,
-    functions: Vec<Box<[Function]>>,
-    function_var_to_register: Vec<Box<[Map<&'a Str, u32>]>>,
-    constants: Vec<Box<[u8]>>,
+    functions: Vec<Function>,
+    constant_to_index: Map<Box<[u8]>, u32>,
+    constants: Vec<Constant>,
+    register_to_index: Map<&'a Str, (u32, TypeId)>,
+    registers: Vec<Register>,
+    builtin_registers: Map<BuiltinRegister, u32>,
+    builtin_types: Map<BuiltinType, u32>,
+    strings_buffer: Vec<u8>,
 }
 
 #[derive(Debug)]
-struct Type<'a> {
-    len: u32,
-    fields: Map<&'a Str, Field>,
+enum Type<'a> {
+    Integer32,
+    Natural32,
+    ConstantString,
+    User { value_to_id: Map<&'a Str, u32> },
 }
 
-#[derive(Debug)]
-struct Field {
-    offset: u32,
-    format: FieldFormat,
-}
-
-#[derive(Debug)]
-enum FieldFormat {
-    One { ty: TypeId },
-    Tag { types: Box<[TypeId]> },
-}
-
-#[derive(Debug)]
-struct Function {
-    args: Box<[RegisterIndex]>,
-    registers: Box<[TypeId]>,
-    instructions: Box<[Call]>,
-    lambdas: Box<[Box<[Call]>]>,
-}
-
-#[derive(Debug)]
-struct Call {
-    function: FunctionIndex,
-    move_in: Box<[MoveIn]>,
-    move_out: Box<[MoveOut]>,
-}
-
-#[derive(Debug)]
-struct MoveIn {
-    src: Box<[RegisterIndex]>,
-    dst: RegisterIndex,
-}
-
-#[derive(Debug)]
-struct MoveOut {
-    src: RegisterIndex,
-    dst: Box<[RegisterIndex]>,
-}
-
-#[derive(Debug)]
-struct FunctionIndex(u32);
-
-#[derive(Debug)]
-struct RegisterIndex(u32);
-
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TypeId(u32);
 
-impl Program {
-    pub fn from_collection(collection: &Collection) -> Result<Self, Error> {
-        let mut builder = ProgramBuilder {
-            collection,
-            types_to_index: Default::default(),
-            types: Default::default(),
-            function_to_index: Default::default(),
-            functions: Default::default(),
-            function_var_to_register: Default::default(),
-            constants: Default::default(),
-        };
+#[derive(Debug)]
+pub(crate) enum Instruction {
+    /// Copy one register to another.
+    Move { to: u32, from: u32 },
+    /// Set register value based on value in constants map.
+    Set { to: u32, from: u32 },
+    /// Jump and push return address.
+    Call { address: u32 },
+    /// Pop and return to popped address.
+    Return,
+    /// Jump to address.
+    Jump { address: u32 },
+    /// Jump if a register matches a constant.
+    JumpEq {
+        address: u32,
+        register: u32,
+        constant: u32,
+    },
+    /// Call a builtin function.
+    SystemCall { function: BuiltinFunction },
+}
 
-        builder.collect_types()?;
-        builder.collect_functions()?;
+impl Program {
+    pub fn from_collection(collection: &Collection, entry: &Str) -> Result<Self, Error> {
+        let mut builder = ProgramBuilder::default();
+
+        builder.collect_types(collection)?;
+        builder.collect_registers(collection)?;
+        builder.collect_functions(collection)?;
 
         Ok(Self {
-            functions: builder.functions.into(),
             constants: builder.constants.into(),
+            registers: builder.registers.into(),
+            functions: builder.functions.into(),
+            strings_buffer: builder.strings_buffer.into(),
+            entry: builder.function_to_index[entry],
         })
+    }
+
+    pub fn max_call_depth(&self, entry: u32) -> u32 {
+        self.functions[entry as usize]
+            .0
+            .iter()
+            .map(|i| match i {
+                &Instruction::Call { address } => 1 + self.max_call_depth(address),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0)
     }
 }
 
 impl<'a> ProgramBuilder<'a> {
-    /// Collect types.
-    fn collect_types(&mut self) -> Result<(), Error> {
-        for (name, record) in self.collection.data.iter() {
-            let ty = match record {
-                Record::User { fields } => Type {
-                    len: u32::MAX,
-                    fields: Default::default(),
-                },
-                Record::Opaque { size } => Type {
-                    len: *size,
-                    fields: Default::default(),
+    fn collect_types(&mut self, collection: &'a Collection) -> Result<(), Error> {
+        for (name, ty) in collection.types.iter() {
+            let i = u32::try_from(self.types.len()).unwrap();
+            self.types_to_index.try_insert(name, i).unwrap();
+            let ty = match ty {
+                crate::Type::User(values) => {
+                    let value_to_id = values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| (v, u32::try_from(i).unwrap()))
+                        .collect();
+                    Type::User { value_to_id }
+                }
+                &crate::Type::Builtin(b) => {
+                    self.builtin_types.try_insert(b, i).unwrap();
+                    match b {
+                        BuiltinType::Integer32 => Type::Integer32,
+                        BuiltinType::Natural32 => Type::Natural32,
+                        BuiltinType::ConstantString => Type::ConstantString,
+                    }
                 }
             };
+            self.types.push(ty);
+        }
+        Ok(())
+    }
+
+    fn collect_registers(&mut self, collection: &'a Collection) -> Result<(), Error> {
+        for (name, reg) in collection.registers.iter() {
+            dbg!(name, reg);
+            let i = u32::try_from(self.registers.len()).unwrap();
+            let (ty, builtin) = match reg {
+                crate::Register::User(ty) => (self.types_to_index[ty], None),
+                &crate::Register::Builtin(which) => {
+                    self.builtin_registers.try_insert(which, i).unwrap();
+                    let ty = match which {
+                        BuiltinRegister::WriteConstantStringValue => BuiltinType::ConstantString,
+                    };
+                    (self.builtin_types[&ty], Some(which))
+                }
+            };
+            self.register_to_index.insert(name, (i, TypeId(ty)));
+            let bits = self.types[ty as usize].bit_size();
+            self.registers.push(Register { bits, builtin });
+        }
+        Ok(())
+    }
+
+    fn collect_functions(&mut self, collection: &'a Collection) -> Result<(), Error> {
+        // prepass so we can immediately resolve addresses
+        let mut i = 0;
+        for (name, _) in collection.functions.iter() {
+            dbg!(name);
+            self.function_to_index.try_insert(name, i).unwrap();
+            i += 1;
         }
 
-        for name in self.collection.data.keys() {
-            let _ = self.resolve_type(name)?;
+        dbg!(&self.function_to_index);
+
+        for (_name, func) in collection.functions.iter() {
+            dbg!(_name);
+            let f = match func {
+                crate::Function::User {
+                    instructions: instrs,
+                    next,
+                } => {
+                    let mut instructions = Vec::new();
+
+                    for instr in instrs.iter() {
+                        dbg!(instr);
+                        match instr {
+                            crate::Instruction::Set { to, value } => {
+                                let (to, ty) = self.register_to_index[to];
+                                let from = self.get_or_add_const(ty, value)?;
+                                instructions.push(Instruction::Set { to, from });
+                            }
+                            crate::Instruction::Move { to, from } => {
+                                let to = self.register_to_index[to].0;
+                                let from = self.register_to_index[from].0;
+                                instructions.push(Instruction::Move { to, from });
+                            }
+                            crate::Instruction::Call { function } => {
+                                let address = self.function_to_index[function];
+                                instructions.push(Instruction::Call { address });
+                            }
+                        }
+                    }
+
+                    if let Some(f) = next.as_ref() {
+                        dbg!(f);
+                        let address = self.function_to_index[f];
+                        instructions.push(Instruction::Jump { address })
+                    } else {
+                        instructions.push(Instruction::Return)
+                    }
+
+                    Function(instructions.into())
+                }
+                &crate::Function::Builtin(function) => {
+                    Function([Instruction::SystemCall { function }, Instruction::Return].into())
+                }
+            };
+            self.functions.push(f);
         }
 
         Ok(())
     }
 
-    /// Resolve type length
-    fn resolve_type(&mut self, name: &'a Str) -> Result<u32, Error> {
-        let index = self.types_to_index[name];
+    fn get_or_add_const(&mut self, ty: TypeId, value: &Str) -> Result<u32, Error> {
+        let value = {
+            match &self.types[ty.0 as usize] {
+                Type::Integer32 => value.parse::<i32>().unwrap().to_ne_bytes().to_vec(),
+                Type::Natural32 => value.parse::<u32>().unwrap().to_ne_bytes().to_vec(),
+                Type::ConstantString => {
+                    let offt = u32::try_from(self.strings_buffer.len()).unwrap();
 
-        let f = |s: &mut Self| &mut s.types[index as usize];
+                    let mut it = value.bytes();
+                    if it.next() != Some(b'"') {
+                        todo!();
+                    }
 
-        let len = f(self).len;
-        if len != u32::MAX {
-            return Ok(len);
-        }
+                    loop {
+                        let c = it.next().unwrap();
+                        match c {
+                            b'\\' => todo!(),
+                            b'"' => break,
+                            c => self.strings_buffer.push(c),
+                        }
+                    }
 
-        let Record::User { fields } = &self.collection.data[name] else { unreachable!() };
+                    if it.next().is_some() {
+                        todo!();
+                    }
 
-        let mut len = 0;
-        let mut n_fields = Map::new();
-        for (name, types) in fields.iter() {
-            assert!(!types.is_empty());
-            let mut field_len = 0;
-            for ty in types.iter() {
-                field_len = field_len.max(self.resolve_type(ty)?);
+                    let len = u32::try_from(self.strings_buffer.len()).unwrap() - offt;
+                    let mut b = [0; 8];
+                    b[..4].copy_from_slice(&offt.to_ne_bytes());
+                    b[4..].copy_from_slice(&len.to_ne_bytes());
+                    b.to_vec()
+                }
+                Type::User { value_to_id } => {
+                    let id = value_to_id[value];
+                    if value_to_id.len() < 1 << 8 {
+                        (id as u8).to_ne_bytes().to_vec()
+                    } else if value_to_id.len() < 1 << 16 {
+                        (id as u16).to_ne_bytes().to_vec()
+                    } else if value_to_id.len() < 1 << 32 {
+                        (id as u32).to_ne_bytes().to_vec()
+                    } else {
+                        (id as u64).to_ne_bytes().to_vec()
+                    }
+                }
             }
-            let f = |n| self.types_to_index[n];
-            let format = if types.len() == 1 {
-                FieldFormat::One { ty: f(&types[0]) }
-            } else {
-                field_len += 4;
-                FieldFormat::Tag { types: types.iter().map(f).collect() }
-            };
-            n_fields.insert(name, Field {
-                offset: len,
-                format,
+        };
+
+        let value = value.into_boxed_slice();
+
+        let i = self
+            .constant_to_index
+            .entry(value.clone())
+            .or_insert_with(|| {
+                let i = u32::try_from(self.constants.len()).unwrap();
+                self.constants.push(Constant { value });
+                i
             });
-            len += field_len;
-        }
 
-        let ty = f(self);
-        ty.len = len;
-        ty.fields = n_fields;
-
-        Ok(len)
-    }
-
-    /// Collect functions.
-    fn collect_functions(&mut self) -> Result<(), Error> {
-        for (name, list) in self.collection.functions.iter() {
-            let mut n_list = Vec::new();
-            let mut n_var_to_register = Vec::new();
-            for f in list.iter() {
-                let mut args = Vec::new();
-                let mut var_to_register = Map::new();
-                let mut register_offset = 0;
-                for ((mode, ty), name) in f.args.iter().zip(f.arg_names.iter()) {
-                    var_to_register.insert(name, register_offset);
-                    register_offset += 0;
-                }
-                for stmt in f.statements.iter() {
-                    match stmt {
-                        Statement::Call { function, args } => todo!(),
-                        Statement::Variable { name } => todo!(),
-                        Statement::Constant { name } => todo!(),
-                    }
-                }
-                n_list.push(Function {
-                    args,
-                    instructions: Vec::new(),
-                });
-                n_var_to_register.push(var_to_register);
-            }
-            self.function_to_index.insert(name, self.functions.len().try_into().unwrap());
-            self.functions.push(n_list.into());
-            self.function_var_to_register.push(n_var_to_register.into())
-        }
-
-        self.parse_functions()?;
-
-        Ok(())
-    }
-
-    fn parse_functions(&mut self) -> Result<(), Error> {
-        for (name, ff_l) in self.collection.functions.iter() {
-            let i = self.function_to_index[name];
-            let f_l = &self.functions[i as usize];
-            let v2i_l = &self.function_var_to_register[i as usize];
-            for (ff, (f, v2i)) in ff_l.iter().zip(f_l.iter_mut().zip(v2i_l.iter())) {
-                assert!(f.instructions.is_empty());
-                for stmt in ff.statements.iter() {
-                    let Statement::Call { function, args } = stmt else { continue };
-                    let f_index = self.function_to_index[function];
-                    f.instructions.push(Instruction::SetTarget { function: f_index, index: u32::MAX });
-                    for (mode, arg) in args.iter() {
-                        match mode {
-                            ArgMode::In | ArgMode::Ref => {
-                                f.instructions.push(Instruction::MoveTo { from, to: () });
-                            }
-                            ArgMode::Out => {}
-                        }
-                    }
-                    f.instructions.push(Instruction::Call);
-                    for (mode, arg) in args.iter() {
-                        match mode {
-                            ArgMode::Out | ArgMode::Ref => {
-                                f.instructions.push(Instruction::MoveFrom { from: (), to: () });
-                            }
-                            ArgMode::In => {}
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn parse_functions_one(&mut self, name: &'a Str, f: &'a crate::Function) -> Result<(), Error> {
-        let mut vars = Map::new();
-
-        {
-            let label = FunctionLabel::<'a> {
-                name,
-                args: Cow::from(&*f.args),
-            };
-            let v = self.function_map.entry(label).or_default();
-            if v.location.is_some() {
-                return Err(Error);
-            }
-            v.location = Some(self.bytecode.len().try_into().unwrap());
-        }
-
-        for (name, (mode, ty)) in f.arg_names.iter().zip(f.args.iter()) {
-            let index = vars.len().try_into().unwrap();
-            let (status, mode) = match mode {
-                ArgMode::In => (VarStatus::Init, VarMode::In { index }),
-                ArgMode::Out => (VarStatus::Uninit, VarMode::Out { index }),
-                ArgMode::Ref => (VarStatus::Init, VarMode::Ref { index }),
-            };
-            if vars.try_insert(name, Var { status, mode, ty }).is_err() {
-                return Err(Error);
-            }
-        }
-
-        let i = ();
-
-        for (i, stmt) in f.statements.iter().enumerate() {
-            match stmt {
-                Statement::Variable { name } | Statement::Constant { name } => {
-                    dbg!(name);
-                    todo!();
-                }
-                Statement::Call { function, args } => {
-                    dbg!(function, args, &vars);
-                    let mut arg_types = Vec::new();
-                    for (i, (mode, value)) in args.iter().enumerate() {
-                        let i = u32::try_from(i).unwrap();
-                        let ty = match value {
-                            Value::Register(name) => {
-                                let var = vars.get(name).ok_or(Error)?;
-                                match mode {
-                                    ArgMode::In => todo!(),
-                                    ArgMode::Out => todo!(),
-                                    ArgMode::Ref => {
-                                        if !var.is_init() {
-                                            return Err(Error);
-                                        }
-                                        self.set_arg(var, &[], i);
-                                    }
-                                }
-                                var.ty.clone()
-                            }
-                            Value::String(s) => {
-                                if mode == &ArgMode::Out {
-                                    return Err(Error);
-                                }
-                                let val = self.add_slice(s.as_bytes());
-                                self.op_setarg_const(val, i);
-                                "ConstantString".into()
-                            }
-                        };
-                        arg_types.push((*mode, ty));
-                    }
-                    self.op_call(FunctionLabel {
-                        name: function,
-                        args: Cow::from(arg_types),
-                    }, )
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn add_slice(&mut self, data: &[u8]) -> u32 {
-        let i = self.constants.len().try_into().unwrap();
-        self.constants.extend(u32::try_from(data.len()).unwrap().to_ne_bytes());
-        self.constants.extend_from_slice(data);
-        i
+        Ok(*i)
     }
 }
 
-impl<'a> Var<'a> {
-    fn is_init(&self) -> bool {
-        matches!(&self.status, VarStatus::Init)
+impl<'a> Type<'a> {
+    /// Minimum size in bits.
+    pub fn bit_size(&self) -> u32 {
+        match self {
+            Self::Integer32 | Self::Natural32 => 32,
+            // offset + length
+            Self::ConstantString => 32 + 32,
+            Self::User { value_to_id } => value_to_id
+                .len()
+                .checked_next_power_of_two()
+                .map_or(usize::BITS, |x| x.try_into().unwrap()),
+        }
+    }
+
+    /// Minimum size in bytes.
+    pub fn byte_size(&self) -> u32 {
+        (self.bit_size() + 7) / 8
     }
 }

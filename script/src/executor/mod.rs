@@ -1,3 +1,5 @@
+pub mod wordvm;
+
 /*
 pub struct Executor<'a> {
     pc: u32,

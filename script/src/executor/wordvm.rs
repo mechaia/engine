@@ -1,0 +1,446 @@
+use {
+    crate::{
+        program::{Constant, Function, Instruction},
+        BuiltinFunction, BuiltinRegister, Map, Program,
+    },
+    core::fmt,
+};
+
+pub struct WordVM {
+    instructions: Box<[u32]>,
+    registers_size: u32,
+    stack_size: u32,
+    strings_offset: u32,
+    builtin_map: BuiltinMap,
+}
+
+#[derive(Debug)]
+pub struct BuiltinMap {
+    pub write_constant_string: u32,
+}
+
+pub struct WordVMState {
+    registers: Box<[u32]>,
+    stack: Box<[u32]>,
+    stack_index: u32,
+    instruction_index: u32,
+}
+
+#[derive(Clone, Debug)]
+pub enum Yield {
+    Finish,
+    Sys { id: u32 },
+    Preempt,
+}
+
+#[derive(Clone, Debug)]
+pub struct Error;
+
+#[derive(Default)]
+struct OpEncoder {
+    instructions: Vec<u32>,
+    label_to_address: Map<u32, u32>,
+    resolve_label: Map<u32, u32>,
+    resolve_constant: Map<u32, ()>,
+}
+
+const OP_MOVE: u32 = 0;
+const OP_SET: u32 = 1;
+const OP_JUMP: u32 = 2;
+const OP_CALL: u32 = 3;
+const OP_RET: u32 = 4;
+const OP_SYS: u32 = 5;
+
+const SYS_WRITE_CONSTANT_STRING: u32 = 0;
+const SYS_WRITE_NEWLINE: u32 = 1;
+
+impl WordVM {
+    pub fn from_program(program: &Program) -> Self {
+        let mut encoder = OpEncoder::default();
+
+        let mut builtin_map = BuiltinMap {
+            write_constant_string: u32::MAX,
+        };
+
+        let mut registers_size = 0;
+        let mut register_offsets = Vec::new();
+
+        for reg in program.registers.iter() {
+            reg.builtin
+                .map(|b| match b {
+                    BuiltinRegister::WriteConstantStringValue => {
+                        &mut builtin_map.write_constant_string
+                    }
+                })
+                .map(|p| *p = registers_size);
+            register_offsets.push(registers_size);
+            registers_size += words_for_bits(reg.bits);
+        }
+
+        let mut constants_size = 0;
+        let mut constant_offsets = Vec::new();
+
+        for cst in program.constants.iter() {
+            constant_offsets.push(constants_size);
+            constants_size += cst.value.len() as u32;
+        }
+
+        let mut conv = |i, f: &Function| {
+            encoder
+                .label_to_address
+                .try_insert(i, encoder.cur())
+                .unwrap();
+            for instr in f.0.iter() {
+                let r = |i: u32| register_offsets[i as usize];
+                let c = |i: u32| constant_offsets[i as usize];
+                let l = |i: u32| words_for_bits(program.registers[i as usize].bits);
+                match instr {
+                    &Instruction::Move { to, from } => encoder.op_move(r(from), r(to), l(to)),
+                    &Instruction::Set { to, from } => encoder.op_set(c(from), r(to), l(to)),
+                    &Instruction::Call { address } => encoder.op_call(address),
+                    &Instruction::Return => encoder.op_ret(),
+                    &Instruction::Jump { address } => encoder.op_jump(address),
+                    &Instruction::JumpEq {
+                        address,
+                        register,
+                        constant,
+                    } => todo!(),
+                    &Instruction::SystemCall { function } => match function {
+                        BuiltinFunction::WriteConstantString => {
+                            encoder.op_sys(SYS_WRITE_CONSTANT_STRING)
+                        }
+                        BuiltinFunction::WriteNewline => encoder.op_sys(SYS_WRITE_NEWLINE),
+                    },
+                }
+            }
+        };
+
+        conv(program.entry, &program.functions[program.entry as usize]);
+        for (i, f) in program.functions.iter().enumerate() {
+            let i = u32::try_from(i).unwrap();
+            if i == program.entry {
+                continue;
+            }
+            conv(i, f);
+        }
+
+        let (instructions, strings_offset) =
+            encoder.finish(&program.constants, &program.strings_buffer);
+        let stack_size = program.max_call_depth(program.entry);
+
+        Self {
+            instructions,
+            registers_size,
+            stack_size,
+            strings_offset,
+            builtin_map,
+        }
+    }
+
+    pub fn create_state(&self) -> WordVMState {
+        WordVMState {
+            registers: vec![0; self.registers_size as usize].into(),
+            stack: vec![0; self.stack_size as usize].into(),
+            stack_index: 0,
+            instruction_index: 0,
+        }
+    }
+
+    pub fn strings_buffer(&self) -> &[u8] {
+        slice_u32_as_u8(&self.instructions[self.strings_offset as usize..])
+    }
+
+    pub fn builtin_register_map(&self) -> &BuiltinMap {
+        &self.builtin_map
+    }
+
+    pub fn sys_id_to_builtin(&self, id: u32) -> Result<BuiltinFunction, Error> {
+        Ok(match id {
+            SYS_WRITE_NEWLINE => BuiltinFunction::WriteNewline,
+            SYS_WRITE_CONSTANT_STRING => BuiltinFunction::WriteConstantString,
+            _ => return Err(Error),
+        })
+    }
+}
+
+impl fmt::Debug for WordVM {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut cst_offset = self.strings_offset;
+
+        let mut i = 0;
+        loop {
+            let Some(op) = self.instructions[..cst_offset as usize].get(i) else {
+                break;
+            };
+            i += 1;
+            match *op {
+                OP_SET => {
+                    if let Some(&from) = self.instructions.get(i) {
+                        cst_offset = cst_offset.min(from)
+                    }
+                    i += 3;
+                }
+                OP_RET => {}
+                OP_JUMP | OP_CALL | OP_SYS => i += 1,
+                OP_MOVE => i += 3,
+                _ => {}
+            }
+        }
+
+        write!(f, "stack size: {}\n", self.stack_size)?;
+        write!(f, "registers size: {}\n", self.registers_size)?;
+        write!(f, "constants offset: {cst_offset}\n")?;
+        write!(f, "strings offset: {}\n", self.strings_offset)?;
+        f.write_str("instructions:\n")?;
+        let mut i = 0;
+        loop {
+            let Some(op) = self.instructions[..cst_offset as usize].get(i) else {
+                break;
+            };
+            write!(f, "{i:>7}: ")?;
+            i += 1;
+            let mut next_u32 = || {
+                i += 1;
+                self.instructions.get(i - 1).copied()
+            };
+            match *op {
+                OP_MOVE => match (next_u32(), next_u32(), next_u32()) {
+                    (Some(from), Some(to), Some(count)) => {
+                        write!(f, "MOVE    {from} {to} {count}")?
+                    }
+                    _ => f.write_str("MOVE    ???")?,
+                },
+                OP_SET => match (next_u32(), next_u32(), next_u32()) {
+                    (Some(from), Some(to), Some(count)) => {
+                        write!(f, "SET     {from} {to} {count}")?
+                    }
+                    _ => f.write_str("SET     ???")?,
+                },
+                OP_SYS => match next_u32() {
+                    Some(id) => write!(f, "SYS     {id}")?,
+                    _ => f.write_str("SYS     ???")?,
+                },
+                OP_JUMP => match next_u32() {
+                    Some(address) => write!(f, "JUMP    {address}")?,
+                    _ => f.write_str("JUMP    ???")?,
+                },
+                OP_CALL => match next_u32() {
+                    Some(address) => write!(f, "CALL    {address}")?,
+                    _ => f.write_str("CALL    ???")?,
+                },
+                OP_RET => {
+                    write!(f, "RET")?;
+                }
+                op => write!(f, "??? {op}")?,
+            }
+            f.write_str("\n")?;
+        }
+
+        write!(f, "constants (right to left):\n")?;
+        for c in self
+            .instructions
+            .iter()
+            .take(self.strings_offset as usize)
+            .skip(i)
+        {
+            let c = c.to_le();
+            write!(f, "{i:>7}: {c:08x}\n")?;
+            i += 1;
+        }
+
+        write!(f, "strings buffer: ")?;
+        for c in slice_u32_as_u8(&self.instructions[self.strings_offset as usize..]) {
+            // FIXME bruh
+            write!(f, "{}", *c as char)?;
+        }
+        f.write_str("\n")?;
+
+        write!(f, "builtin map: {:?}", &self.builtin_map)?;
+
+        Ok(())
+    }
+}
+
+impl WordVMState {
+    pub fn step(&mut self, vm: &WordVM) -> Result<Yield, Error> {
+        let op = *vm
+            .instructions
+            .get(self.instruction_index as usize)
+            .ok_or(Error)?;
+        self.instruction_index += 1;
+        let mut next_u32 = || {
+            self.instruction_index += 1;
+            vm.instructions
+                .get(self.instruction_index as usize - 1)
+                .copied()
+                .ok_or(Error)
+        };
+        match op {
+            OP_MOVE => {
+                let from = next_u32()? as usize;
+                let to = next_u32()? as usize;
+                let count = next_u32()? as usize;
+                if to > self.registers.len() || from > self.registers.len() {
+                    return Err(Error);
+                }
+                let (from, to) = if from < to {
+                    // from --- to
+                    self.registers.split_at_mut(to)
+                } else {
+                    // to -- from
+                    let (a, b) = self.registers.split_at_mut(from);
+                    (b, a)
+                };
+                let from = from.get(..count).ok_or(Error)?;
+                let to = to.get_mut(..count).ok_or(Error)?;
+                to.copy_from_slice(from);
+            }
+            OP_SET => {
+                let from = next_u32()? as usize;
+                let to = next_u32()? as usize;
+                let count = next_u32()? as usize;
+
+                let from = vm
+                    .instructions
+                    .get(from..)
+                    .and_then(|s| s.get(..count))
+                    .ok_or(Error)?;
+                let to = self
+                    .registers
+                    .get_mut(to..)
+                    .and_then(|s| s.get_mut(..count))
+                    .ok_or(Error)?;
+
+                to.copy_from_slice(from);
+            }
+            OP_JUMP => {
+                self.instruction_index = next_u32()?;
+            }
+            OP_CALL => {
+                let address = next_u32()?;
+                *self.stack.get_mut(self.stack_index as usize).ok_or(Error)? =
+                    self.instruction_index;
+                self.stack_index += 1;
+                self.instruction_index = address;
+            }
+            OP_RET => {
+                if self.stack_index == 0 {
+                    return Ok(Yield::Finish);
+                }
+                self.stack_index -= 1;
+                self.instruction_index = *self.stack.get(self.stack_index as usize).ok_or(Error)?;
+            }
+            OP_SYS => {
+                let id = next_u32()?;
+                return Ok(Yield::Sys { id });
+            }
+            _ => return Err(Error),
+        }
+        Ok(Yield::Preempt)
+    }
+
+    pub fn register(&self, offset: u32) -> Result<u32, Error> {
+        self.registers.get(offset as usize).copied().ok_or(Error)
+    }
+
+    pub fn set_register(&mut self, offset: u32, value: u32) -> Result<(), Error> {
+        self.registers.get_mut(offset as usize).ok_or(Error).map(|r| *r = value)
+    }
+}
+
+impl OpEncoder {
+    fn cur(&self) -> u32 {
+        self.instructions.len().try_into().unwrap()
+    }
+
+    fn op_move(&mut self, from: u32, to: u32, count: u32) {
+        self.instructions
+            .extend_from_slice(&[OP_MOVE, from, to, count]);
+    }
+
+    fn op_set(&mut self, from: u32, to: u32, count: u32) {
+        self.resolve_constant
+            .try_insert(self.cur() + 1, ())
+            .unwrap();
+        self.instructions
+            .extend_from_slice(&[OP_SET, from, to, count]);
+    }
+
+    fn op_call(&mut self, address: u32) {
+        self.resolve_label
+            .try_insert(self.cur() + 1, address)
+            .unwrap();
+        self.instructions.extend_from_slice(&[OP_CALL, u32::MAX]);
+    }
+
+    fn op_ret(&mut self) {
+        self.instructions.push(OP_RET);
+    }
+
+    fn op_jump(&mut self, address: u32) {
+        self.resolve_label
+            .try_insert(self.cur() + 1, address)
+            .unwrap();
+        self.instructions.extend_from_slice(&[OP_JUMP, u32::MAX]);
+    }
+
+    fn op_sys(&mut self, id: u32) {
+        self.instructions.extend_from_slice(&[OP_SYS, id]);
+    }
+
+    fn finish(mut self, constants: &[Constant], strings_buffer: &[u8]) -> (Box<[u32]>, u32) {
+        for (&address, label) in self.resolve_label.iter() {
+            self.instructions[address as usize] = self.label_to_address[label];
+        }
+        let pc = self.cur();
+        for (&i, ()) in self.resolve_constant.iter() {
+            self.instructions[i as usize] += pc;
+        }
+
+        self.instructions.reserve(
+            constants
+                .iter()
+                .map(|c| c.value.len())
+                .chain([strings_buffer.len()])
+                .sum(),
+        );
+
+        for cst in constants.iter() {
+            extend_u32_from_u8(&mut self.instructions, &cst.value);
+        }
+
+        let strings_offset = self.cur();
+
+        extend_u32_from_u8(&mut self.instructions, strings_buffer);
+
+        (self.instructions.into(), strings_offset)
+    }
+}
+
+fn words_for_bits(bits: u32) -> u32 {
+    (bits + 31) / 32
+}
+
+fn words_for_bytes(bytes: u32) -> u32 {
+    (bytes + 3) / 4
+}
+
+fn slice_u32_as_u8(s: &[u32]) -> &[u8] {
+    let len = s.len() * 4;
+    let ptr = s.as_ptr().cast::<u8>();
+    unsafe { core::slice::from_raw_parts(ptr, len) }
+}
+
+fn slice_u32_as_u8_mut(s: &mut [u32]) -> &mut [u8] {
+    let len = s.len() * 4;
+    let ptr = s.as_mut_ptr().cast::<u8>();
+    unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+}
+
+fn extend_u32_from_u8(v: &mut Vec<u32>, s: &[u8]) {
+    v.extend(s.chunks(4).map(|v| {
+        let mut b = [0; 4];
+        b[..v.len()].copy_from_slice(v);
+        u32::from_le_bytes(b)
+    }));
+}
