@@ -71,7 +71,7 @@ enum ErrorKind {
 #[derive(Debug)]
 struct Switch {
     register: Str,
-    branches: Map<Str, Str>,
+    branches: Box<[(Str, Str)]>,
     default: Option<Str>,
 }
 
@@ -189,7 +189,10 @@ impl Collection {
         let (register, line) = next_word(line)?;
         next_eol(line)?;
 
-        let mut branches = Map::new();
+        // Use a plain list to
+        // - have consistent compile output
+        // - take in account optimizations done by the user, like putting common case first
+        let mut branches = Vec::new();
 
         let default = loop {
             let line = lines.next().ok_or(ErrorKind::ExpectedLine)?.trim_end();
@@ -200,7 +203,7 @@ impl Collection {
                 "~" => {
                     let (value, line) = next_word(line)?;
                     let (function, line) = next_word(line)?;
-                    branches.try_insert(value.into(), function.into()).unwrap();
+                    branches.push((value.into(), function.into()));
                     next_eol(line)?;
                 }
                 "!" => {
@@ -218,7 +221,7 @@ impl Collection {
 
         let f = Switch {
             register: register.into(),
-            branches,
+            branches: branches.into(),
             default: default.map(|d| d.into()),
         };
 
@@ -347,7 +350,6 @@ mod test {
         dbg!(&prog);
         let vm = super::executor::wordvm::WordVM::from_program(&prog);
         dbg!(&vm);
-        //todo!();
         let mut exec = vm.create_state();
         loop {
             match exec.step(&vm).inspect_err(|_| { dbg!(&exec); }).unwrap() {

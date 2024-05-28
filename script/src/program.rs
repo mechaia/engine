@@ -241,7 +241,7 @@ impl<'a> ProgramBuilder<'a> {
                 Type::Natural32 => todo!(),
                 Type::ConstantString => todo!(),
                 Type::User { value_to_id } => {
-                    let all = value_to_id.keys().all(|k| func.branches.contains_key(&**k));
+                    let all = value_to_id.keys().all(|k| func.branches.iter().any(|(kk, _)| kk == &**k));
                     if !all && func.default.is_none() {
                         todo!()
                     }
