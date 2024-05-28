@@ -17,8 +17,12 @@ pub struct WordVM {
 #[derive(Debug)]
 pub struct BuiltinMap {
     pub write_constant_string: u32,
+    pub write_character: u32,
+    pub write_integer32: u32,
+    pub write_natural32: u32,
 }
 
+#[derive(Debug)]
 pub struct WordVMState {
     registers: Box<[u32]>,
     stack: Box<[u32]>,
@@ -40,19 +44,23 @@ pub struct Error;
 struct OpEncoder {
     instructions: Vec<u32>,
     label_to_address: Map<u32, u32>,
-    resolve_label: Map<u32, u32>,
+    resolve_label: Map<u32, (Resolve, u32)>,
     resolve_constant: Map<u32, ()>,
 }
 
-const OP_MOVE: u32 = 0;
-const OP_SET: u32 = 1;
-const OP_JUMP: u32 = 2;
-const OP_CALL: u32 = 3;
-const OP_RET: u32 = 4;
-const OP_SYS: u32 = 5;
+#[derive(Debug)]
+enum Resolve {
+    Full,
+    Shift4,
+}
 
-const SYS_WRITE_CONSTANT_STRING: u32 = 0;
-const SYS_WRITE_NEWLINE: u32 = 1;
+const OP4_MOVE: u32 = 0;
+const OP4_SET: u32 = 1;
+const OP4_JUMP: u32 = 2;
+const OP4_JUMPEQ: u32 = 3;
+const OP4_CALL: u32 = 4;
+const OP4_RET: u32 = 5;
+const OP4_SYS: u32 = 6;
 
 impl WordVM {
     pub fn from_program(program: &Program) -> Self {
@@ -60,6 +68,9 @@ impl WordVM {
 
         let mut builtin_map = BuiltinMap {
             write_constant_string: u32::MAX,
+            write_character: u32::MAX,
+            write_integer32: u32::MAX,
+            write_natural32: u32::MAX,
         };
 
         let mut registers_size = 0;
@@ -68,9 +79,12 @@ impl WordVM {
         for reg in program.registers.iter() {
             reg.builtin
                 .map(|b| match b {
-                    BuiltinRegister::WriteConstantStringValue => {
+                    BuiltinRegister::WriteConstantString => {
                         &mut builtin_map.write_constant_string
                     }
+                    BuiltinRegister::WriteCharacter => &mut builtin_map.write_character,
+                    BuiltinRegister::WriteInteger32 => &mut builtin_map.write_integer32,
+                    BuiltinRegister::WriteNatural32 => &mut builtin_map.write_natural32,
                 })
                 .map(|p| *p = registers_size);
             register_offsets.push(registers_size);
@@ -82,7 +96,7 @@ impl WordVM {
 
         for cst in program.constants.iter() {
             constant_offsets.push(constants_size);
-            constants_size += cst.value.len() as u32;
+            constants_size += words_for_bytes(cst.value.len() as u32);
         }
 
         let mut conv = |i, f: &Function| {
@@ -104,13 +118,11 @@ impl WordVM {
                         address,
                         register,
                         constant,
-                    } => todo!(),
-                    &Instruction::SystemCall { function } => match function {
-                        BuiltinFunction::WriteConstantString => {
-                            encoder.op_sys(SYS_WRITE_CONSTANT_STRING)
-                        }
-                        BuiltinFunction::WriteNewline => encoder.op_sys(SYS_WRITE_NEWLINE),
-                    },
+                    } => {
+                        // Constant value is inline, so don't map
+                        encoder.op_jumpeq(address, r(register), constant)
+                    }
+                    &Instruction::SystemCall { function } => encoder.op_sys(function as _),
                 }
             }
         };
@@ -155,11 +167,21 @@ impl WordVM {
     }
 
     pub fn sys_id_to_builtin(&self, id: u32) -> Result<BuiltinFunction, Error> {
-        Ok(match id {
-            SYS_WRITE_NEWLINE => BuiltinFunction::WriteNewline,
-            SYS_WRITE_CONSTANT_STRING => BuiltinFunction::WriteConstantString,
-            _ => return Err(Error),
-        })
+        macro_rules! cvt {
+            [$($fn:ident)*] => {
+                Ok(match () {
+                    $(_ if id == BuiltinFunction::$fn as u32 => BuiltinFunction::$fn,)*
+                    _ => return Err(Error),
+                })
+            };
+        }
+        cvt![
+            WriteConstantString
+            WriteCharacter
+            WriteInteger32
+            WriteNatural32
+            WriteNewline
+        ]
     }
 }
 
@@ -173,17 +195,20 @@ impl fmt::Debug for WordVM {
                 break;
             };
             i += 1;
-            match *op {
-                OP_SET => {
+            match *op & 15 {
+                OP4_SET => {
                     if let Some(&from) = self.instructions.get(i) {
                         cst_offset = cst_offset.min(from)
                     }
-                    i += 3;
+                    i += 2;
                 }
-                OP_RET => {}
-                OP_JUMP | OP_CALL | OP_SYS => i += 1,
-                OP_MOVE => i += 3,
-                _ => {}
+                OP4_JUMP | OP4_CALL | OP4_RET | OP4_SYS => {}
+                OP4_MOVE | OP4_JUMPEQ => i += 2,
+                // break so the error is visible
+                _ => {
+                    cst_offset = self.strings_offset;
+                    break
+                }
             }
         }
 
@@ -203,32 +228,47 @@ impl fmt::Debug for WordVM {
                 i += 1;
                 self.instructions.get(i - 1).copied()
             };
-            match *op {
-                OP_MOVE => match (next_u32(), next_u32(), next_u32()) {
-                    (Some(from), Some(to), Some(count)) => {
-                        write!(f, "MOVE    {from} {to} {count}")?
+            match *op & 15 {
+                OP4_MOVE => {
+                    let count = op >> 4;
+                    match (next_u32(), next_u32()) {
+                        (Some(from), Some(to)) => {
+                            write!(f, "MOVE    {count} {from} {to}")?
+                        }
+                        _ => write!(f, "MOVE    {count} ???")?,
                     }
-                    _ => f.write_str("MOVE    ???")?,
                 },
-                OP_SET => match (next_u32(), next_u32(), next_u32()) {
-                    (Some(from), Some(to), Some(count)) => {
-                        write!(f, "SET     {from} {to} {count}")?
+                OP4_SET => {
+                    let count = op >> 4;
+                    match (next_u32(), next_u32()) {
+                        (Some(from), Some(to)) => {
+                            write!(f, "SET     {count} {from} {to}")?
+                        }
+                        _ => write!(f, "SET     {count} ???")?,
                     }
-                    _ => f.write_str("SET     ???")?,
                 },
-                OP_SYS => match next_u32() {
-                    Some(id) => write!(f, "SYS     {id}")?,
-                    _ => f.write_str("SYS     ???")?,
+                OP4_SYS => {
+                    let id = op >> 4;
+                    write!(f, "SYS     {id}")?
                 },
-                OP_JUMP => match next_u32() {
-                    Some(address) => write!(f, "JUMP    {address}")?,
-                    _ => f.write_str("JUMP    ???")?,
+                OP4_JUMP => {
+                    let address = op >> 4;
+                    write!(f, "JUMP    {address}")?
                 },
-                OP_CALL => match next_u32() {
-                    Some(address) => write!(f, "CALL    {address}")?,
-                    _ => f.write_str("CALL    ???")?,
+                OP4_JUMPEQ => {
+                    let address = op >> 4;
+                    match (next_u32(), next_u32()) {
+                        (Some(register), Some(value)) => {
+                            write!(f, "JUMPEQ  {address} {register} {value}")?;
+                        }
+                        _ => write!(f, "JUMPEQ  {address} ???")?,
+                    }
+                }
+                OP4_CALL => {
+                    let address = op >> 4;
+                    write!(f, "CALL    {address}")?
                 },
-                OP_RET => {
+                OP4_RET => {
                     write!(f, "RET")?;
                 }
                 op => write!(f, "??? {op}")?,
@@ -275,30 +315,33 @@ impl WordVMState {
                 .copied()
                 .ok_or(Error)
         };
-        match op {
-            OP_MOVE => {
+        match op & 15 {
+            OP4_MOVE => {
+                let count = (op >> 4) as usize;
                 let from = next_u32()? as usize;
                 let to = next_u32()? as usize;
-                let count = next_u32()? as usize;
                 if to > self.registers.len() || from > self.registers.len() {
                     return Err(Error);
                 }
                 let (from, to) = if from < to {
                     // from --- to
-                    self.registers.split_at_mut(to)
+                    let (a, b) = self.registers.split_at_mut(to);
+                    let a = a.get_mut(from..).ok_or(Error)?;
+                    (a, b)
                 } else {
                     // to -- from
                     let (a, b) = self.registers.split_at_mut(from);
+                    let a = a.get_mut(to..).ok_or(Error)?;
                     (b, a)
                 };
                 let from = from.get(..count).ok_or(Error)?;
                 let to = to.get_mut(..count).ok_or(Error)?;
                 to.copy_from_slice(from);
             }
-            OP_SET => {
+            OP4_SET => {
+                let count = (op >> 4) as usize;
                 let from = next_u32()? as usize;
                 let to = next_u32()? as usize;
-                let count = next_u32()? as usize;
 
                 let from = vm
                     .instructions
@@ -313,25 +356,35 @@ impl WordVMState {
 
                 to.copy_from_slice(from);
             }
-            OP_JUMP => {
-                self.instruction_index = next_u32()?;
+            OP4_JUMP => {
+                self.instruction_index = op >> 4;
             }
-            OP_CALL => {
-                let address = next_u32()?;
+            OP4_JUMPEQ => {
+                let address = op >> 4;
+                let register = next_u32()? as usize;
+                let value = next_u32()?;
+
+                let cur = *self.registers.get(register as usize).ok_or(Error)?;
+                if cur == value {
+                    self.instruction_index = address;
+                }
+            }
+            OP4_CALL => {
+                let address = op >> 4;
                 *self.stack.get_mut(self.stack_index as usize).ok_or(Error)? =
                     self.instruction_index;
                 self.stack_index += 1;
                 self.instruction_index = address;
             }
-            OP_RET => {
+            OP4_RET => {
                 if self.stack_index == 0 {
                     return Ok(Yield::Finish);
                 }
                 self.stack_index -= 1;
                 self.instruction_index = *self.stack.get(self.stack_index as usize).ok_or(Error)?;
             }
-            OP_SYS => {
-                let id = next_u32()?;
+            OP4_SYS => {
+                let id = op >> 4;
                 return Ok(Yield::Sys { id });
             }
             _ => return Err(Error),
@@ -344,7 +397,10 @@ impl WordVMState {
     }
 
     pub fn set_register(&mut self, offset: u32, value: u32) -> Result<(), Error> {
-        self.registers.get_mut(offset as usize).ok_or(Error).map(|r| *r = value)
+        self.registers
+            .get_mut(offset as usize)
+            .ok_or(Error)
+            .map(|r| *r = value)
     }
 }
 
@@ -354,63 +410,71 @@ impl OpEncoder {
     }
 
     fn op_move(&mut self, from: u32, to: u32, count: u32) {
+        assert!(count <= u32::MAX >> 4);
         self.instructions
-            .extend_from_slice(&[OP_MOVE, from, to, count]);
+            .extend_from_slice(&[OP4_MOVE | (count << 4), from, to]);
     }
 
     fn op_set(&mut self, from: u32, to: u32, count: u32) {
+        assert!(count <= u32::MAX >> 4);
         self.resolve_constant
             .try_insert(self.cur() + 1, ())
             .unwrap();
         self.instructions
-            .extend_from_slice(&[OP_SET, from, to, count]);
+            .extend_from_slice(&[OP4_SET | (count << 4), from, to]);
     }
 
     fn op_call(&mut self, address: u32) {
         self.resolve_label
-            .try_insert(self.cur() + 1, address)
+            .try_insert(self.cur(), (Resolve::Shift4, address))
             .unwrap();
-        self.instructions.extend_from_slice(&[OP_CALL, u32::MAX]);
+        self.instructions.extend_from_slice(&[OP4_CALL]);
     }
 
     fn op_ret(&mut self) {
-        self.instructions.push(OP_RET);
+        self.instructions.push(OP4_RET);
     }
 
     fn op_jump(&mut self, address: u32) {
         self.resolve_label
-            .try_insert(self.cur() + 1, address)
+            .try_insert(self.cur(), (Resolve::Shift4, address))
             .unwrap();
-        self.instructions.extend_from_slice(&[OP_JUMP, u32::MAX]);
+        self.instructions.extend_from_slice(&[OP4_JUMP]);
+    }
+
+    fn op_jumpeq(&mut self, address: u32, register: u32, value: u32) {
+        self.resolve_label
+            .try_insert(self.cur(), (Resolve::Shift4, address))
+            .unwrap();
+        self.instructions.extend_from_slice(&[OP4_JUMPEQ, register, value]);
     }
 
     fn op_sys(&mut self, id: u32) {
-        self.instructions.extend_from_slice(&[OP_SYS, id]);
+        assert!(id <= u32::MAX >> 4);
+        self.instructions.extend_from_slice(&[OP4_SYS | (id << 4)]);
     }
 
     fn finish(mut self, constants: &[Constant], strings_buffer: &[u8]) -> (Box<[u32]>, u32) {
-        for (&address, label) in self.resolve_label.iter() {
-            self.instructions[address as usize] = self.label_to_address[label];
+        for (&address, (resolve, label)) in self.resolve_label.iter() {
+            let addr = self.label_to_address[label];
+            match resolve {
+                Resolve::Full => self.instructions[address as usize] = addr,
+                Resolve::Shift4 => {
+                    assert!(addr < u32::MAX >> 4);
+                    self.instructions[address as usize] |= addr << 4;
+                }
+            }
         }
         let pc = self.cur();
         for (&i, ()) in self.resolve_constant.iter() {
             self.instructions[i as usize] += pc;
         }
 
-        self.instructions.reserve(
-            constants
-                .iter()
-                .map(|c| c.value.len())
-                .chain([strings_buffer.len()])
-                .sum(),
-        );
-
         for cst in constants.iter() {
             extend_u32_from_u8(&mut self.instructions, &cst.value);
         }
 
         let strings_offset = self.cur();
-
         extend_u32_from_u8(&mut self.instructions, strings_buffer);
 
         (self.instructions.into(), strings_offset)

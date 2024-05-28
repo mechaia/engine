@@ -5,7 +5,6 @@ $ b Integer32
 $ c ConstantString
 
 > f
-| format_clear
 | f_switch
 = write_newline
 
@@ -16,33 +15,33 @@ $ c ConstantString
 !
 
 > f_a 
-+ write_char_value 'a'
-= write_char
++ write_character_value 'a'
+= write_character
 
 > f_b 
 + write_character_value 'b'
 | write_character
 | f_arrow
-+ write_integer32_value b
+. write_integer32_value b
 = write_integer32
 
 > f_c
 + write_character_value 'c'
 | write_character
 | f_arrow
-+ write_constant_value c
-= write_const
+. write_constant_string_value c
+= write_constant_string
 
 > f_arrow
 + write_constant_string_value " -> "
 = write_constant_string
 
 > start
-. t A
++ t A
 | f
-. t B
-. b 42
++ t B
++ b 42
 | f
-. t C
-. c "Yoyoyo"
++ t C
++ c "Yoyoyo"
 = f

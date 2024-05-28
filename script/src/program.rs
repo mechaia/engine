@@ -1,4 +1,6 @@
-use crate::{BuiltinFunction, BuiltinRegister, BuiltinType, Collection, Error, Map, Str};
+use crate::{
+    BuiltinFunction, BuiltinRegister, BuiltinType, Collection, Error, ErrorKind, Map, Str,
+};
 
 #[derive(Debug)]
 pub struct Program {
@@ -94,6 +96,7 @@ impl Program {
             .iter()
             .map(|i| match i {
                 &Instruction::Call { address } => 1 + self.max_call_depth(address),
+                &Instruction::Jump { address } | &Instruction::JumpEq { address, .. } => self.max_call_depth(address),
                 _ => 0,
             })
             .max()
@@ -130,15 +133,18 @@ impl<'a> ProgramBuilder<'a> {
     }
 
     fn collect_registers(&mut self, collection: &'a Collection) -> Result<(), Error> {
+
         for (name, reg) in collection.registers.iter() {
-            dbg!(name, reg);
             let i = u32::try_from(self.registers.len()).unwrap();
             let (ty, builtin) = match reg {
-                crate::Register::User(ty) => (self.types_to_index[ty], None),
+                crate::Register::User(ty) => (self.ty(ty)?, None),
                 &crate::Register::Builtin(which) => {
                     self.builtin_registers.try_insert(which, i).unwrap();
                     let ty = match which {
-                        BuiltinRegister::WriteConstantStringValue => BuiltinType::ConstantString,
+                        BuiltinRegister::WriteConstantString => BuiltinType::ConstantString,
+                        BuiltinRegister::WriteCharacter => BuiltinType::Natural32,
+                        BuiltinRegister::WriteInteger32 => BuiltinType::Integer32,
+                        BuiltinRegister::WriteNatural32 => BuiltinType::Natural32,
                     };
                     (self.builtin_types[&ty], Some(which))
                 }
@@ -151,18 +157,24 @@ impl<'a> ProgramBuilder<'a> {
     }
 
     fn collect_functions(&mut self, collection: &'a Collection) -> Result<(), Error> {
+        let get_register = |slf: &Self, name: &Str| {
+        };
+        let get_function = |slf: &Self, name: &Str| {
+        };
+
         // prepass so we can immediately resolve addresses
         let mut i = 0;
         for (name, _) in collection.functions.iter() {
-            dbg!(name);
+            self.function_to_index.try_insert(name, i).unwrap();
+            i += 1;
+        }
+        for (name, _) in collection.switches.iter() {
             self.function_to_index.try_insert(name, i).unwrap();
             i += 1;
         }
 
-        dbg!(&self.function_to_index);
-
         for (_name, func) in collection.functions.iter() {
-            dbg!(_name);
+
             let f = match func {
                 crate::Function::User {
                     instructions: instrs,
@@ -171,28 +183,26 @@ impl<'a> ProgramBuilder<'a> {
                     let mut instructions = Vec::new();
 
                     for instr in instrs.iter() {
-                        dbg!(instr);
                         match instr {
                             crate::Instruction::Set { to, value } => {
-                                let (to, ty) = self.register_to_index[to];
+                                let (to, ty) = self.register(to)?;
                                 let from = self.get_or_add_const(ty, value)?;
                                 instructions.push(Instruction::Set { to, from });
                             }
                             crate::Instruction::Move { to, from } => {
-                                let to = self.register_to_index[to].0;
-                                let from = self.register_to_index[from].0;
+                                let to = self.register(to)?.0;
+                                let from = self.register(from)?.0;
                                 instructions.push(Instruction::Move { to, from });
                             }
                             crate::Instruction::Call { function } => {
-                                let address = self.function_to_index[function];
+                                let address = self.function(function)?;
                                 instructions.push(Instruction::Call { address });
                             }
                         }
                     }
 
                     if let Some(f) = next.as_ref() {
-                        dbg!(f);
-                        let address = self.function_to_index[f];
+                        let address = self.function(f)?;
                         instructions.push(Instruction::Jump { address })
                     } else {
                         instructions.push(Instruction::Return)
@@ -207,36 +217,66 @@ impl<'a> ProgramBuilder<'a> {
             self.functions.push(f);
         }
 
+        for (_name, func) in collection.switches.iter() {
+            let mut instructions = Vec::new();
+            let (register, ty) = self.register(&func.register)?;
+            let ty = &self.types[ty.0 as usize];
+            match ty {
+                Type::Integer32 => todo!(),
+                Type::Natural32 => todo!(),
+                Type::ConstantString => todo!(),
+                Type::User { value_to_id } => {
+                    let all = value_to_id.keys().all(|k| func.branches.contains_key(&**k));
+                    if !all && func.default.is_none() {
+                        todo!()
+                    }
+                    for (value, next) in func.branches.iter() {
+                        let address = self.function(next)?;
+                        let constant = *value_to_id.get(value).ok_or_else(|| todo!())?;
+                        instructions.push(Instruction::JumpEq { address, register, constant });
+                    }
+                }
+            }
+            self.functions.push(Function(instructions.into()));
+        }
+
         Ok(())
+    }
+
+    fn ty(&self, name: &Str) -> Result<u32, Error> {
+        self.types_to_index
+            .get(name)
+            .ok_or_else(|| Error {
+                kind: ErrorKind::TypeNotFound(name.to_string()),
+            })
+            .copied()
+    }
+
+    fn register(&self, name: &Str) -> Result<(u32, TypeId), Error> {
+        self.register_to_index
+            .get(name)
+            .ok_or_else(|| Error {
+                kind: ErrorKind::RegisterNotFound(name.to_string()),
+            })
+            .copied()
+    }
+
+    fn function(&self, name: &Str) -> Result<u32, Error> {
+        self.function_to_index
+            .get(name)
+            .ok_or_else(|| Error {
+                kind: ErrorKind::FunctionNotFound(name.to_string()),
+            })
+            .copied()
     }
 
     fn get_or_add_const(&mut self, ty: TypeId, value: &Str) -> Result<u32, Error> {
         let value = {
             match &self.types[ty.0 as usize] {
-                Type::Integer32 => value.parse::<i32>().unwrap().to_ne_bytes().to_vec(),
-                Type::Natural32 => value.parse::<u32>().unwrap().to_ne_bytes().to_vec(),
+                Type::Integer32 => self.parse_integer32(value)?.to_ne_bytes().to_vec(),
+                Type::Natural32 => self.parse_natural32(value)?.to_ne_bytes().to_vec(),
                 Type::ConstantString => {
-                    let offt = u32::try_from(self.strings_buffer.len()).unwrap();
-
-                    let mut it = value.bytes();
-                    if it.next() != Some(b'"') {
-                        todo!();
-                    }
-
-                    loop {
-                        let c = it.next().unwrap();
-                        match c {
-                            b'\\' => todo!(),
-                            b'"' => break,
-                            c => self.strings_buffer.push(c),
-                        }
-                    }
-
-                    if it.next().is_some() {
-                        todo!();
-                    }
-
-                    let len = u32::try_from(self.strings_buffer.len()).unwrap() - offt;
+                    let (offt, len) = self.parse_constant_string(value)?;
                     let mut b = [0; 8];
                     b[..4].copy_from_slice(&offt.to_ne_bytes());
                     b[4..].copy_from_slice(&len.to_ne_bytes());
@@ -269,6 +309,98 @@ impl<'a> ProgramBuilder<'a> {
             });
 
         Ok(*i)
+    }
+
+    fn parse_constant_string(&mut self, value: &Str) -> Result<(u32, u32), Error> {
+        let offt = u32::try_from(self.strings_buffer.len()).unwrap();
+
+        let mut it = value.bytes();
+        if it.next() != Some(b'"') {
+            todo!();
+        }
+
+        loop {
+            let c = it.next().unwrap();
+            match c {
+                b'\\' => todo!(),
+                b'"' => break,
+                c => self.strings_buffer.push(c),
+            }
+        }
+
+        if it.next().is_some() {
+            todo!();
+        }
+
+        let len = u32::try_from(self.strings_buffer.len()).unwrap() - offt;
+
+        Ok((offt, len))
+    }
+
+    fn parse_natural32(&mut self, value: &Str) -> Result<u32, Error> {
+        self.parse_natural128(value)
+            .and_then(|n| Ok(n.try_into().unwrap()))
+    }
+
+    fn parse_integer32(&mut self, value: &Str) -> Result<i32, Error> {
+        let (neg, s) = if value.starts_with("-") {
+            (true, &value[1..])
+        } else {
+            (false, &value[..])
+        };
+        let n = self.parse_natural128(s)?;
+        let n = i128::try_from(n).unwrap();
+        let n = i32::try_from(if neg { -n } else { n }).unwrap();
+        Ok(n)
+    }
+
+    fn parse_char(&mut self, value: &str) -> Result<u32, Error> {
+        let mut it = value.chars();
+        if it.next() != Some('\'') {
+            todo!();
+        }
+
+        let c = match it.next() {
+            Some('\\') => todo!(),
+            Some('\'') => todo!(),
+            Some(c) => c as u32,
+            None => todo!(),
+        };
+
+        if it.next() != Some('\'') {
+            todo!();
+        }
+        if it.next().is_some() {
+            todo!();
+        }
+
+        Ok(c)
+    }
+
+    fn parse_natural128(&mut self, value: &str) -> Result<u128, Error> {
+        if value.starts_with("'") {
+            return self.parse_char(value).map(u128::from);
+        }
+
+        let base = 10;
+
+        let mut n = 0u128;
+        for b in value.bytes() {
+            let x = match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                b'A'..=b'F' => b - b'A' + 10,
+                _ => todo!(),
+            };
+            let x = u128::from(x);
+            if x >= base {
+                todo!();
+            }
+            n = n.checked_mul(base).ok_or_else(|| todo!())?;
+            n = n.checked_add(x).ok_or_else(|| todo!())?;
+        }
+
+        Ok(n)
     }
 }
 

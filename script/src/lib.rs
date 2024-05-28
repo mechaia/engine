@@ -41,7 +41,10 @@ pub(crate) enum Register {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum BuiltinRegister {
-    WriteConstantStringValue,
+    WriteConstantString,
+    WriteCharacter,
+    WriteInteger32,
+    WriteNatural32,
 }
 
 #[derive(Debug)]
@@ -53,17 +56,21 @@ pub struct Error {
 enum ErrorKind {
     UnterminatedString,
     ExpectedIdentifier,
+    DuplicateType,
+    DuplicateRegister,
     DuplicateFunction,
-    DuplicateObject,
     ExpectedWord,
     ExpectedEndOfLine,
     ExpectedLine,
+    TypeNotFound(String),
+    RegisterNotFound(String),
+    FunctionNotFound(String),
 }
 
 #[derive(Debug)]
 struct Switch {
     register: Str,
-    branches: Map<Str, Box<[(Str, Str)]>>,
+    branches: Map<Str, Str>,
     default: Option<Str>,
 }
 
@@ -80,6 +87,9 @@ enum Function {
 #[derive(Clone, Copy, Debug)]
 enum BuiltinFunction {
     WriteConstantString,
+    WriteCharacter,
+    WriteInteger32,
+    WriteNatural32,
     WriteNewline,
 }
 
@@ -96,6 +106,8 @@ impl Collection {
             self.types.try_insert(k.into(), Type::Builtin(v)).unwrap();
         };
         f("ConstantString", BuiltinType::ConstantString);
+        f("Integer32", BuiltinType::Integer32);
+        f("Natural32", BuiltinType::Natural32);
 
         let mut f = |k: &str, v| {
             self.registers
@@ -104,8 +116,11 @@ impl Collection {
         };
         f(
             "write_constant_string_value",
-            BuiltinRegister::WriteConstantStringValue,
+            BuiltinRegister::WriteConstantString,
         );
+        f("write_character_value", BuiltinRegister::WriteCharacter);
+        f("write_integer32_value", BuiltinRegister::WriteInteger32);
+        f("write_natural32_value", BuiltinRegister::WriteNatural32);
 
         let mut f = |k: &str, v| {
             self.functions
@@ -116,6 +131,9 @@ impl Collection {
             "write_constant_string",
             BuiltinFunction::WriteConstantString,
         );
+        f("write_character", BuiltinFunction::WriteCharacter);
+        f("write_integer32", BuiltinFunction::WriteInteger32);
+        f("write_natural32", BuiltinFunction::WriteNatural32);
         f("write_newline", BuiltinFunction::WriteNewline);
 
         Ok(())
@@ -124,7 +142,6 @@ impl Collection {
     pub fn parse_text(&mut self, prefix: &str, text: &str) -> Result<(), Error> {
         let mut lines = text.lines();
         while let Some(line) = lines.next() {
-            dbg!(line);
             let line = line.trim_end();
             let Ok((word, line)) = next_word(line) else {
                 continue;
@@ -142,18 +159,28 @@ impl Collection {
     }
 
     fn line_parse_type(&mut self, line: &str) -> Result<(), ErrorKind> {
-        let (ty, mut line) = next_word(line)?;
+        let (name, mut line) = next_word(line)?;
+        let mut variants = Vec::new();
         while let Ok((word, l)) = next_word(line) {
+            variants.push(word.into());
             line = l;
         }
-        Ok(())
+        let ty = Type::User(variants.into());
+        self.types
+            .try_insert(name.into(), ty)
+            .map_err(|_| ErrorKind::DuplicateType)
+            .map(|_| ())
     }
 
     fn line_parse_register(&mut self, line: &str) -> Result<(), ErrorKind> {
         let (name, line) = next_word(line)?;
         let (ty, line) = next_word(line)?;
         next_eol(line)?;
-        Ok(())
+        let reg = Register::User(ty.into());
+        self.registers
+            .try_insert(name.into(), reg)
+            .map_err(|_| ErrorKind::DuplicateRegister)
+            .map(|_| ())
     }
 
     fn line_parse_switch(&mut self, lines: &mut Lines<'_>, line: &str) -> Result<(), ErrorKind> {
@@ -171,7 +198,8 @@ impl Collection {
             match word {
                 "~" => {
                     let (value, line) = next_word(line)?;
-                    let (name, line) = next_word(line)?;
+                    let (function, line) = next_word(line)?;
+                    branches.try_insert(value.into(), function.into()).unwrap();
                     next_eol(line)?;
                 }
                 "!" => {
@@ -207,17 +235,14 @@ impl Collection {
 
         let next = loop {
             let line = lines.next().ok_or(ErrorKind::ExpectedLine)?.trim_end();
-            dbg!(line);
             let Ok((word, line)) = next_word(line) else {
                 continue;
             };
-            dbg!(word);
             match word {
                 "." => {
                     let (to, line) = next_word(line)?;
                     let (from, line) = next_word(line)?;
                     next_eol(line)?;
-                    dbg!(line);
                     instructions.push(Instruction::Move {
                         to: to.into(),
                         from: from.into(),
@@ -227,7 +252,6 @@ impl Collection {
                     let (to, line) = next_word(line)?;
                     let (value, line) = next_word(line)?;
                     next_eol(line)?;
-                    dbg!(line);
                     instructions.push(Instruction::Set {
                         to: to.into(),
                         value: value.into(),
@@ -236,7 +260,6 @@ impl Collection {
                 "|" => {
                     let (function, line) = next_word(line)?;
                     next_eol(line)?;
-                    dbg!(line);
                     instructions.push(Instruction::Call {
                         function: function.into(),
                     });
@@ -313,8 +336,8 @@ mod test {
     fn stuff() {
         let mut col = super::Collection::default();
         col.add_default_builtins().unwrap();
-        let s = include_str!("../examples2/hello_world.pil");
-        //let s = include_str!("../examples2/union.pil");
+        //let s = include_str!("../examples2/hello_world.pil");
+        let s = include_str!("../examples2/union.pil");
         col.parse_text("", s).unwrap();
         dbg!(&col);
         let prog = super::Program::from_collection(&col, &"start".to_string().into()).unwrap();
@@ -323,18 +346,35 @@ mod test {
         dbg!(&vm);
         let mut exec = vm.create_state();
         loop {
-            match exec.step(&vm).unwrap() {
+            match exec.step(&vm).inspect_err(|_| { dbg!(&exec); }).unwrap() {
                 super::executor::wordvm::Yield::Preempt => {}
                 super::executor::wordvm::Yield::Finish => break,
                 super::executor::wordvm::Yield::Sys { id } => {
-                    match vm.sys_id_to_builtin(id).unwrap() {
+                    match vm.sys_id_to_builtin(id).inspect_err(|_| { dbg!(&exec); }).unwrap() {
                         super::BuiltinFunction::WriteConstantString => {
                             let reg = vm.builtin_register_map().write_constant_string;
                             let offt = exec.register(reg).unwrap();
                             let len = exec.register(reg + 1).unwrap();
+                            if offt == 42 { dbg!(&exec); }
                             let s = &vm.strings_buffer()[offt as usize..][..len as usize];
                             let s = core::str::from_utf8(s).unwrap();
                             dbg!(s);
+                        }
+                        super::BuiltinFunction::WriteCharacter => {
+                            let reg = vm.builtin_register_map().write_character;
+                            let chr = exec.register(reg).unwrap();
+                            let chr = char::from_u32(chr).unwrap();
+                            dbg!(chr);
+                        }
+                        super::BuiltinFunction::WriteInteger32 => {
+                            let reg = vm.builtin_register_map().write_integer32;
+                            let n = exec.register(reg).unwrap();
+                            dbg!(n as i32);
+                        }
+                        super::BuiltinFunction::WriteNatural32 => {
+                            let reg = vm.builtin_register_map().write_natural32;
+                            let n = exec.register(reg).unwrap();
+                            dbg!(n as u32);
                         }
                         super::BuiltinFunction::WriteNewline => {
                             dbg!("newline");
