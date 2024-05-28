@@ -1,6 +1,6 @@
-use crate::{
+use {crate::{
     BuiltinFunction, BuiltinRegister, BuiltinType, Collection, Error, ErrorKind, Map, Str,
-};
+}, core::fmt};
 
 #[derive(Debug)]
 pub struct Program {
@@ -8,7 +8,6 @@ pub struct Program {
     pub(crate) registers: Box<[Register]>,
     pub(crate) functions: Box<[Function]>,
     pub(crate) strings_buffer: Box<[u8]>,
-    pub(crate) entry: u32,
 }
 
 #[derive(Debug)]
@@ -51,7 +50,7 @@ enum Type<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct TypeId(u32);
 
-#[derive(Debug)]
+#[derive(Clone, Copy)]
 pub(crate) enum Instruction {
     /// Copy one register to another.
     Move { to: u32, from: u32 },
@@ -77,16 +76,17 @@ impl Program {
     pub fn from_collection(collection: &Collection, entry: &Str) -> Result<Self, Error> {
         let mut builder = ProgramBuilder::default();
 
+        let stub_entry = "".to_string().into_boxed_str();
+
         builder.collect_types(collection)?;
         builder.collect_registers(collection)?;
-        builder.collect_functions(collection)?;
+        builder.collect_functions(collection, entry, &stub_entry)?;
 
         Ok(Self {
             constants: builder.constants.into(),
             registers: builder.registers.into(),
             functions: builder.functions.into(),
             strings_buffer: builder.strings_buffer.into(),
-            entry: builder.function_to_index[entry],
         })
     }
 
@@ -101,6 +101,20 @@ impl Program {
             })
             .max()
             .unwrap_or(0)
+    }
+}
+
+impl fmt::Debug for Instruction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Move { to, from } => write!(f, "MOVE    {to} {from}"),
+            Self::Set { to, from } => write!(f, "SET     {to} {from}"),
+            Self::Call { address } => write!(f, "CALL    {address}"),
+            Self::Return => f.write_str("RETURN"),
+            Self::Jump { address } => write!(f, "JUMP    {address}"),
+            Self::JumpEq { address, register, constant } => write!(f, "JUMPEQ  {address} {register} {constant}"),
+            Self::SystemCall { function } => write!(f, "SYSCALL {function:?}"),
+        }
     }
 }
 
@@ -133,7 +147,6 @@ impl<'a> ProgramBuilder<'a> {
     }
 
     fn collect_registers(&mut self, collection: &'a Collection) -> Result<(), Error> {
-
         for (name, reg) in collection.registers.iter() {
             let i = u32::try_from(self.registers.len()).unwrap();
             let (ty, builtin) = match reg {
@@ -156,14 +169,13 @@ impl<'a> ProgramBuilder<'a> {
         Ok(())
     }
 
-    fn collect_functions(&mut self, collection: &'a Collection) -> Result<(), Error> {
-        let get_register = |slf: &Self, name: &Str| {
-        };
-        let get_function = |slf: &Self, name: &Str| {
-        };
-
+    fn collect_functions(&mut self, collection: &'a Collection, entry: &'a Str, entry_stub: &'a Str) -> Result<(), Error> {
         // prepass so we can immediately resolve addresses
         let mut i = 0;
+        // insert stub function as entry
+        // it's an easy hack and is trivial to optimize anyway
+        self.function_to_index.try_insert(entry_stub, i).unwrap();
+        i += 1;
         for (name, _) in collection.functions.iter() {
             self.function_to_index.try_insert(name, i).unwrap();
             i += 1;
@@ -173,8 +185,11 @@ impl<'a> ProgramBuilder<'a> {
             i += 1;
         }
 
-        for (_name, func) in collection.functions.iter() {
+        self.functions.push(Function([
+            Instruction::Jump { address: self.function(entry)? },
+        ].into()));
 
+        for (_name, func) in collection.functions.iter() {
             let f = match func {
                 crate::Function::User {
                     instructions: instrs,
@@ -230,10 +245,14 @@ impl<'a> ProgramBuilder<'a> {
                     if !all && func.default.is_none() {
                         todo!()
                     }
-                    for (value, next) in func.branches.iter() {
+                    for (i, (value, next)) in func.branches.iter().enumerate() {
                         let address = self.function(next)?;
                         let constant = *value_to_id.get(value).ok_or_else(|| todo!())?;
-                        instructions.push(Instruction::JumpEq { address, register, constant });
+                        if func.default.is_some() || i < func.branches.len() - 1 {
+                            instructions.push(Instruction::JumpEq { address, register, constant });
+                        } else {
+                            instructions.push(Instruction::Jump { address });
+                        }
                     }
                 }
             }

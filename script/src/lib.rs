@@ -5,6 +5,7 @@ use std::str::Lines;
 
 mod executor;
 mod program;
+pub mod optimize;
 
 //pub use util::str::PoolBoxU8 as Str;
 pub use program::Program;
@@ -340,10 +341,13 @@ mod test {
         let s = include_str!("../examples2/union.pil");
         col.parse_text("", s).unwrap();
         dbg!(&col);
-        let prog = super::Program::from_collection(&col, &"start".to_string().into()).unwrap();
+        let mut prog = super::Program::from_collection(&col, &"start".to_string().into()).unwrap();
+        dbg!(&prog);
+        super::optimize::simple(&mut prog);
         dbg!(&prog);
         let vm = super::executor::wordvm::WordVM::from_program(&prog);
         dbg!(&vm);
+        //todo!();
         let mut exec = vm.create_state();
         loop {
             match exec.step(&vm).inspect_err(|_| { dbg!(&exec); }).unwrap() {

@@ -112,8 +112,20 @@ impl WordVM {
                     &Instruction::Move { to, from } => encoder.op_move(r(from), r(to), l(to)),
                     &Instruction::Set { to, from } => encoder.op_set(c(from), r(to), l(to)),
                     &Instruction::Call { address } => encoder.op_call(address),
-                    &Instruction::Return => encoder.op_ret(),
-                    &Instruction::Jump { address } => encoder.op_jump(address),
+                    &Instruction::Return => {
+                        encoder.op_ret();
+                        // break just in case another instruction follows
+                        break;
+                    }
+                    &Instruction::Jump { address } => {
+                        // If the target address is just behind this function,
+                        // omit this redundant jump
+                        if i + 1 != address || 1 == 0 {
+                            encoder.op_jump(address);
+                        }
+                        // break just in case another instruction follows
+                        break;
+                    }
                     &Instruction::JumpEq {
                         address,
                         register,
@@ -127,18 +139,14 @@ impl WordVM {
             }
         };
 
-        conv(program.entry, &program.functions[program.entry as usize]);
         for (i, f) in program.functions.iter().enumerate() {
             let i = u32::try_from(i).unwrap();
-            if i == program.entry {
-                continue;
-            }
             conv(i, f);
         }
 
         let (instructions, strings_offset) =
             encoder.finish(&program.constants, &program.strings_buffer);
-        let stack_size = program.max_call_depth(program.entry);
+        let stack_size = program.max_call_depth(0);
 
         Self {
             instructions,
@@ -253,7 +261,7 @@ impl fmt::Debug for WordVM {
                 },
                 OP4_JUMP => {
                     let address = op >> 4;
-                    write!(f, "JUMP    {address}")?
+                    write!(f, "JUMP    {address}\n")?
                 },
                 OP4_JUMPEQ => {
                     let address = op >> 4;
@@ -269,7 +277,7 @@ impl fmt::Debug for WordVM {
                     write!(f, "CALL    {address}")?
                 },
                 OP4_RET => {
-                    write!(f, "RET")?;
+                    write!(f, "RET\n")?;
                 }
                 op => write!(f, "??? {op}")?,
             }
