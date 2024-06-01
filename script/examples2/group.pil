@@ -1,0 +1,29 @@
+( Vector3
+& .x Natural32
+& .y Natural32
+& .z Natural32
+)
+
+( Matrix3
+& .a Vector3
+& .b Vector3
+& .c Vector3
+)
+
+$ vector Vector3
+$ matrix Matrix3
+
+> start
++ vector.x 3
++ vector.y 4
++ vector.z 5
++ matrix.a.x 1
++ matrix.a.y 2
++ matrix.a.z 3
++ matrix.b.x 4
++ matrix.b.y 5
++ matrix.b.z 6
++ matrix.c.x 7
++ matrix.c.y 8
++ matrix.c.z 9
+<

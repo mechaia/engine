@@ -1,7 +1,7 @@
 use {
     crate::{
         program::{Constant, Function, Instruction},
-        BuiltinFunction, BuiltinRegister, Map, Program,
+        Map, Program,
     },
     core::fmt,
 };
@@ -11,15 +11,7 @@ pub struct WordVM {
     registers_size: u32,
     stack_size: u32,
     strings_offset: u32,
-    builtin_map: BuiltinMap,
-}
-
-#[derive(Debug)]
-pub struct BuiltinMap {
-    pub write_constant_string: u32,
-    pub write_character: u32,
-    pub write_integer32: u32,
-    pub write_natural32: u32,
+    sys_to_registers: Box<[Box<[u32]>]>,
 }
 
 #[derive(Debug)]
@@ -66,30 +58,17 @@ impl WordVM {
     pub fn from_program(program: &Program) -> Self {
         let mut encoder = OpEncoder::default();
 
-        let mut builtin_map = BuiltinMap {
-            write_constant_string: u32::MAX,
-            write_character: u32::MAX,
-            write_integer32: u32::MAX,
-            write_natural32: u32::MAX,
-        };
-
         let mut registers_size = 0;
         let mut register_offsets = Vec::new();
 
         for reg in program.registers.iter() {
-            reg.builtin
-                .map(|b| match b {
-                    BuiltinRegister::WriteConstantString => {
-                        &mut builtin_map.write_constant_string
-                    }
-                    BuiltinRegister::WriteCharacter => &mut builtin_map.write_character,
-                    BuiltinRegister::WriteInteger32 => &mut builtin_map.write_integer32,
-                    BuiltinRegister::WriteNatural32 => &mut builtin_map.write_natural32,
-                })
-                .map(|p| *p = registers_size);
             register_offsets.push(registers_size);
             registers_size += words_for_bits(reg.bits);
         }
+
+        let sys_to_registers = program.sys_to_registers.iter()
+            .map(|v| v.iter().map(|i| register_offsets[usize::try_from(*i).unwrap()]).collect())
+            .collect();
 
         let mut constants_size = 0;
         let mut constant_offsets = Vec::new();
@@ -134,7 +113,7 @@ impl WordVM {
                         // Constant value is inline, so don't map
                         encoder.op_jumpeq(address, r(register), constant)
                     }
-                    &Instruction::SystemCall { function } => encoder.op_sys(function as _),
+                    &Instruction::SystemCall { id } => encoder.op_sys(id),
                 }
             }
         };
@@ -153,7 +132,7 @@ impl WordVM {
             registers_size,
             stack_size,
             strings_offset,
-            builtin_map,
+            sys_to_registers,
         }
     }
 
@@ -166,30 +145,12 @@ impl WordVM {
         }
     }
 
+    pub fn sys_registers(&self, id: u32) -> &[u32] {
+        self.sys_to_registers.get(usize::try_from(id).unwrap()).map_or(&[], |v| &**v)
+    }
+
     pub fn strings_buffer(&self) -> &[u8] {
         slice_u32_as_u8(&self.instructions[self.strings_offset as usize..])
-    }
-
-    pub fn builtin_register_map(&self) -> &BuiltinMap {
-        &self.builtin_map
-    }
-
-    pub fn sys_id_to_builtin(&self, id: u32) -> Result<BuiltinFunction, Error> {
-        macro_rules! cvt {
-            [$($fn:ident)*] => {
-                Ok(match () {
-                    $(_ if id == BuiltinFunction::$fn as u32 => BuiltinFunction::$fn,)*
-                    _ => return Err(Error),
-                })
-            };
-        }
-        cvt![
-            WriteConstantString
-            WriteCharacter
-            WriteInteger32
-            WriteNatural32
-            WriteNewline
-        ]
     }
 }
 
@@ -215,7 +176,7 @@ impl fmt::Debug for WordVM {
                 // break so the error is visible
                 _ => {
                     cst_offset = self.strings_offset;
-                    break
+                    break;
                 }
             }
         }
@@ -240,29 +201,25 @@ impl fmt::Debug for WordVM {
                 OP4_MOVE => {
                     let count = op >> 4;
                     match (next_u32(), next_u32()) {
-                        (Some(from), Some(to)) => {
-                            write!(f, "MOVE    {count} {from} {to}")?
-                        }
+                        (Some(from), Some(to)) => write!(f, "MOVE    {count} {from} {to}")?,
                         _ => write!(f, "MOVE    {count} ???")?,
                     }
-                },
+                }
                 OP4_SET => {
                     let count = op >> 4;
                     match (next_u32(), next_u32()) {
-                        (Some(from), Some(to)) => {
-                            write!(f, "SET     {count} {from} {to}")?
-                        }
+                        (Some(from), Some(to)) => write!(f, "SET     {count} {from} {to}")?,
                         _ => write!(f, "SET     {count} ???")?,
                     }
-                },
+                }
                 OP4_SYS => {
                     let id = op >> 4;
                     write!(f, "SYS     {id}")?
-                },
+                }
                 OP4_JUMP => {
                     let address = op >> 4;
                     write!(f, "JUMP    {address}\n")?
-                },
+                }
                 OP4_JUMPEQ => {
                     let address = op >> 4;
                     match (next_u32(), next_u32()) {
@@ -275,16 +232,16 @@ impl fmt::Debug for WordVM {
                 OP4_CALL => {
                     let address = op >> 4;
                     write!(f, "CALL    {address}")?
-                },
-                OP4_RET => {
-                    write!(f, "RET\n")?;
                 }
-                op => write!(f, "??? {op}")?,
+                OP4_RET => {
+                    f.write_str("RET\n")?
+                }
+                op => f.write_str("??? {op}")?,
             }
             f.write_str("\n")?;
         }
 
-        write!(f, "constants (right to left):\n")?;
+        f.write_str("constants (right to left):\n")?;
         for c in self
             .instructions
             .iter()
@@ -296,14 +253,17 @@ impl fmt::Debug for WordVM {
             i += 1;
         }
 
-        write!(f, "strings buffer: ")?;
+        f.write_str("strings buffer: ")?;
         for c in slice_u32_as_u8(&self.instructions[self.strings_offset as usize..]) {
             // FIXME bruh
             write!(f, "{}", *c as char)?;
         }
         f.write_str("\n")?;
 
-        write!(f, "builtin map: {:?}", &self.builtin_map)?;
+        f.write_str("sys register map:\n")?;
+        for (id, regs) in self.sys_to_registers.iter().enumerate() {
+            write!(f, "{id:>7}: {:?}\n", &regs)?;
+        }
 
         Ok(())
     }
@@ -454,7 +414,8 @@ impl OpEncoder {
         self.resolve_label
             .try_insert(self.cur(), (Resolve::Shift4, address))
             .unwrap();
-        self.instructions.extend_from_slice(&[OP4_JUMPEQ, register, value]);
+        self.instructions
+            .extend_from_slice(&[OP4_JUMPEQ, register, value]);
     }
 
     fn op_sys(&mut self, id: u32) {

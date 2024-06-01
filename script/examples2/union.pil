@@ -8,11 +8,11 @@ $ c ConstantString
 | f_switch
 = write_newline
 
-? f_switch t
-~ A f_a
-~ B f_b
-~ C f_c
-!
+[ f_switch t
+? A f_a
+? B f_b
+? C f_c
+]
 
 > f_a 
 + write_character_value 'a'
