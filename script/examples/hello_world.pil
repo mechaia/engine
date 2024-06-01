@@ -1,10 +1,4 @@
-import {
-    Env
-    write_stdout
-}
-
-export function main(Env env) {
-    (Env) {
-        write_stdout(env, "Hello, world!")
-    }
-}
+> start
++ write_constant_string_value "Hello, world!"
+| write_constant_string
+= write_newline

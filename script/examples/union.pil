@@ -1,30 +1,47 @@
-import {
-    Env
-}
+% T A B C
 
-data T {
-    A
-    B
-    C
-}
+$ t T
+$ b Integer32
+$ c ConstantString
 
-function f(T x) -> () {
-    (A) {
-        debug "a -> ", x
-    }
-    (B) {
-        debug "b -> ", x
-    }
-    (C) {
-        debug "c -> ", x
-    }
-}
+> f
+| f_switch
+= write_newline
 
-export function main(Env _) -> () {
-    (Env) {
-        f(A) -> ()
-        f(B) -> ()
-        f(C) -> ()
-        @ ()
-    }
-}
+[ f_switch t
+? A f_a
+? B f_b
+? C f_c
+]
+
+> f_a 
++ write_character_value 'a'
+= write_character
+
+> f_b 
++ write_character_value 'b'
+| write_character
+| f_arrow
+. write_integer32_value b
+= write_integer32
+
+> f_c
++ write_character_value 'c'
+| write_character
+| f_arrow
+. write_constant_string_value c
+= write_constant_string
+
+> f_arrow
++ write_constant_string_value " -> "
+= write_constant_string
+
+> start
++ t A
+| f
++ t B
++ b 42
+| f
++ t C
++ c "Yoyoyo"
+= f

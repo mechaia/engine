@@ -1,4 +1,0 @@
-> start
-+ write_constant_string_value "Hello, world!"
-| write_constant_string
-= write_newline

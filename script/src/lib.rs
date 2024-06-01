@@ -443,9 +443,9 @@ mod test {
     fn stuff() {
         let mut col = super::Collection::default();
         col.add_default_builtins().unwrap();
-        //let s = include_str!("../examples2/hello_world.pil");
-        //let s = include_str!("../examples2/union.pil");
-        let s = include_str!("../examples2/group.pil");
+        //let s = include_str!("../examples/hello_world.pil");
+        //let s = include_str!("../examples/union.pil");
+        let s = include_str!("../examples/group.pil");
         col.parse_text("", s).unwrap();
         dbg!(&col);
         let mut prog = super::Program::from_collection(&col, &"start".to_string().into()).unwrap();
