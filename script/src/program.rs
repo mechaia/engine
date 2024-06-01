@@ -276,44 +276,48 @@ impl<'a> ProgramBuilder<'a> {
                     for instr in instrs.iter() {
                         match instr {
                             crate::Instruction::Set { to, value } => {
-                                let (mut reg, mut post, mut ty) = self.register(to)?;
-                                loop {
-                                    match reg {
-                                        &RegisterMap::Unit { index: to } => {
-                                            let from = self.get_or_add_const(ty, value)?;
-                                            instructions.push(Instruction::Set { to, from });
-                                            break;
-                                        }
-                                        RegisterMap::Group { fields } => {
-                                            let tyty = &self.types[usize::try_from(ty.0).unwrap()];
-                                            let Type::Group { fields: ty_fields } = tyty else { unreachable!() };
-                                            ty = *ty_fields.get(post).unwrap().0;
-                                            (reg, post) = fields.get(post).unwrap();
-                                        }
+                                let (reg, ty) = self.register(to)?;
+                                match reg {
+                                    &RegisterMap::Unit { index: to } => {
+                                        let from = self.get_or_add_const(ty, value)?;
+                                        instructions.push(Instruction::Set { to, from });
+                                    }
+                                    RegisterMap::Group { fields } => {
+                                        todo!();
                                     }
                                 }
                             }
                             crate::Instruction::Move { to, from } => {
-                                let (to, post, to_ty) = self.register(to)?;
-                                let (from, post, from_ty) = self.register(from)?;
+                                let (to, to_ty) = self.register(to)?;
+                                let (from, from_ty) = self.register(from)?;
                                 if to_ty != from_ty {
+                                    dbg!(&self.types, to_ty, from_ty);
                                     todo!()
                                 }
-                                match (to, from) {
-                                    (
-                                        &RegisterMap::Unit { index: to },
-                                        &RegisterMap::Unit { index: from },
-                                    ) => {
-                                        instructions.push(Instruction::Move { to, from });
+
+                                fn f(instructions: &mut Vec<Instruction>, to: &RegisterMap<'_>, from: &RegisterMap<'_>) {
+                                    use RegisterMap::*;
+                                    match (to, from) {
+                                        (
+                                            &Unit { index: to },
+                                            &Unit { index: from },
+                                        ) => {
+                                            instructions.push(Instruction::Move { to, from });
+                                        }
+                                        (
+                                            Group { fields: to },
+                                            Group { fields: from },
+                                        ) => {
+                                            for ((k1, to), (k2, from)) in to.iter().zip(from.iter()) {
+                                                debug_assert_eq!(k1, k2);
+                                                f(instructions, to, from);
+                                            }
+                                        }
+                                        _ => todo!(),
                                     }
-                                    (
-                                        RegisterMap::Group { fields: to },
-                                        RegisterMap::Group { fields: from },
-                                    ) => {
-                                        todo!();
-                                    }
-                                    _ => todo!(),
                                 }
+
+                                f(&mut instructions, to, from);
                             }
                             crate::Instruction::Call { function } => {
                                 let address = self.function(function)?;
@@ -334,7 +338,7 @@ impl<'a> ProgramBuilder<'a> {
                 crate::Function::Builtin { id, registers } => {
                     let id = *id;
                     let regs = registers.iter().map(|r| {
-                        let (reg, post, ty) = self.register(&r.1)?;
+                        let (reg, ty) = self.register(&r.1)?;
                         match reg {
                             RegisterMap::Unit { index } => Ok(*index),
                             RegisterMap::Group { fields } => todo!(),
@@ -349,7 +353,7 @@ impl<'a> ProgramBuilder<'a> {
 
         for (_name, func) in collection.switches.iter() {
             let mut instructions = Vec::new();
-            let (register, post, ty) = self.register(&func.register)?;
+            let (register, ty) = self.register(&func.register)?;
             let ty = &self.types[ty.0 as usize];
             match ty {
                 Type::Integer32 => todo!(),
@@ -398,18 +402,24 @@ impl<'a> ProgramBuilder<'a> {
             .copied()
     }
 
-    fn register(&self, name: &'a Str) -> Result<(&RegisterMap<'a>, &str, TypeId), Error> {
-        self.register_to_index
+    fn register(&self, name: &'a Str) -> Result<(&RegisterMap<'a>, TypeId), Error> {
+        let (mut reg, mut ty, mut post) = self
+            .register_to_index
             .get(name)
-            .map(|((regmap, ty), post)| {
-                if matches!(regmap, RegisterMap::Unit { .. }) {
-                    assert_eq!(post, "");
-                }
-                (regmap, post, *ty)
-            })
+            .map(|((x, y), z)| (x, *y, z))
             .ok_or_else(|| Error {
                 kind: ErrorKind::RegisterNotFound(name.to_string()),
-            })
+            })?;
+
+        while post != "" {
+            let RegisterMap::Group { fields } = reg else { unreachable!() };
+            let tyty = &self.types[usize::try_from(ty.0).unwrap()];
+            let Type::Group { fields: ty_fields } = tyty else { unreachable!() };
+            ty = *ty_fields.get(post).unwrap().0;
+            (reg, post) = fields.get(post).unwrap();
+        }
+
+        Ok((reg, ty))
     }
 
     fn function(&self, name: &Str) -> Result<u32, Error> {
