@@ -1,7 +1,7 @@
 #![feature(slice_split_once, map_try_insert, iterator_try_collect)]
 #![deny(unused_must_use, elided_lifetimes_in_paths)]
 
-use std::{collections::BTreeMap, str::Lines};
+use std::{borrow::Borrow, collections::BTreeMap, hash::Hash, str::Lines};
 
 mod executor;
 pub mod optimize;
@@ -16,7 +16,7 @@ type Map<K, V> = std::collections::HashMap<K, V>;
 #[derive(Debug, Default)]
 pub struct Collection {
     types: Map<Str, Type>,
-    registers: Map<Str, Str>,
+    registers: PrefixMap<Str, Str>,
     switches: Map<Str, Switch>,
     functions: Map<Str, Function>,
 }
@@ -46,7 +46,7 @@ enum ErrorKind {
     ExpectedIdentifier,
     DuplicateType,
     DuplicateField,
-    DuplicateRegister,
+    OverlappingRegister(String),
     DuplicateFunction,
     ExpectedWord,
     ExpectedEndOfLine,
@@ -92,8 +92,8 @@ enum Instruction {
 }
 
 #[derive(Clone, Debug)]
-struct PrefixMap<'a, V> {
-    map: BTreeMap<&'a str, V>,
+struct PrefixMap<K, V> {
+    map: BTreeMap<K, V>,
 }
 
 pub const BUILTIN_WRITE_CONSTANT_STRING: u32 = 0;
@@ -156,6 +156,7 @@ impl Collection {
     pub fn parse_text(&mut self, prefix: &str, text: &str) -> Result<(), Error> {
         let mut lines = text.lines();
         while let Some(line) = lines.next() {
+            let line = line.split('#').next().unwrap_or("");
             let line = line.trim_end();
             let Ok((word, line)) = next_word(line) else {
                 continue;
@@ -228,7 +229,7 @@ impl Collection {
         next_eol(line)?;
         self.registers
             .try_insert(name.into(), ty.into())
-            .map_err(|_| ErrorKind::DuplicateRegister)
+            .map_err(|_| ErrorKind::OverlappingRegister(name.into()))
             .map(|_| ())
     }
 
@@ -350,25 +351,52 @@ impl Collection {
     }
 }
 
-impl<'a, V> PrefixMap<'a, V> {
-    fn get(&self, key: &'a str) -> Option<(&V, &'a str)> {
+impl<K, V> PrefixMap<K, V>
+where
+    K: Ord + Borrow<str>,
+{
+    fn get<'a>(&self, key: &'a str) -> Option<(&V, &'a str)> {
         // https://users.rust-lang.org/t/is-it-possible-to-range-str-str-on-a-btreeset-string/93546/9
         // utter garbage
-        use core::ops::Bound;
-        let range = (Bound::Unbounded, Bound::Included(key));
-        let (k, v) = self.map.range::<str, _>(range).rev().next()?;
+        use core::ops::Bound::*;
+        let range = (Unbounded, Included(key));
+        let (k, v) = self.map.range::<str, _>(range).next_back()?;
+        let k = k.borrow();
         if key.len() < k.len() {
             return None;
         }
         let (pre, post) = key.split_at(k.len());
-        if &*pre != &**k {
+        if pre != k {
             return None;
         }
         Some((v, post))
     }
 
-    fn try_insert(&mut self, key: &'a str, value: V) -> Result<(), ()> {
-        if self.get(&key).is_some() {
+    fn contains(&self, key: &str) -> bool {
+        // A ... AA ... [AB] ... ABC ... AC
+        //
+        // ^-------------^ conflict (1)
+        //
+        //               ^-------^ conflict (2)
+
+        // TODO we'll probably need a custom datastructure to handle (1) efficiently
+
+        // (1)
+        for i in key.char_indices().map(|x| x.0).chain([key.len()]) {
+            if self.map.contains_key(&key[..i]) {
+                return true;
+            }
+        }
+
+        // (2)
+        use core::ops::Bound::*;
+        let range = (Included(key), Unbounded);
+        let Some(x) = self.map.range::<str, _>(range).next() else { return false };
+        x.0.borrow().starts_with(key)
+    }
+
+    fn try_insert(&mut self, key: K, value: V) -> Result<(), ()> {
+        if self.contains(key.borrow()) {
             return Err(());
         }
         self.map
@@ -377,12 +405,12 @@ impl<'a, V> PrefixMap<'a, V> {
         Ok(())
     }
 
-    fn iter(&self) -> impl Iterator<Item = (&&'a str, &V)> {
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.map.iter()
     }
 }
 
-impl<'a, V> Default for PrefixMap<'a, V> {
+impl<K, V> Default for PrefixMap<K, V> {
     fn default() -> Self {
         Self {
             map: Default::default(),
@@ -390,8 +418,11 @@ impl<'a, V> Default for PrefixMap<'a, V> {
     }
 }
 
-impl<'a, V> FromIterator<(&'a str, V)> for PrefixMap<'a, V> {
-    fn from_iter<T: IntoIterator<Item = (&'a str, V)>>(iter: T) -> Self {
+impl<K, V> FromIterator<(K, V)> for PrefixMap<K, V>
+where
+    K: Ord + Borrow<str>,
+{
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let mut s = Self::default();
         for (k, v) in iter {
             s.try_insert(k, v).unwrap();
@@ -504,29 +535,22 @@ mod test {
 
     #[test]
     fn prefix_map() {
-        let mut map = super::PrefixMap::<u32>::default();
+        let mut map = super::PrefixMap::<&str, u32>::default();
 
-        let a_a = "a.a".to_string().into_boxed_str();
-        let a_b = "a.b".to_string().into_boxed_str();
-        let a_c = "a.c".to_string().into_boxed_str();
-        let a_b_a = "a.b.a".to_string().into_boxed_str();
-        let a_b_c = "a.b.c".to_string().into_boxed_str();
-        let a_b_x = "a.b.x".to_string().into_boxed_str();
+        map.try_insert("a.b", 42).unwrap();
+        map.try_insert("a.b", 42).unwrap_err();
+        map.try_insert("a.b.a", 42).unwrap_err();
+        map.try_insert("a.b.c", 42).unwrap_err();
 
-        map.try_insert(&a_b, 42).unwrap();
-        map.try_insert(&a_b, 42).unwrap_err();
-        map.try_insert(&a_b_a, 42).unwrap_err();
-        map.try_insert(&a_b_c, 42).unwrap_err();
-
-        let (v, post) = map.get(&a_b_x).unwrap();
+        let (v, post) = map.get("a.b.x").unwrap();
         assert_eq!(*v, 42);
         assert_eq!(post, ".x");
 
-        let (v, post) = map.get(&a_b_a).unwrap();
+        let (v, post) = map.get("a.b.a").unwrap();
         assert_eq!(*v, 42);
         assert_eq!(post, ".a");
 
-        assert!(map.get(&a_a).is_none());
-        assert!(map.get(&a_c).is_none());
+        assert!(map.get("a.a").is_none());
+        assert!(map.get("a.c").is_none());
     }
 }

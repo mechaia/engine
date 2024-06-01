@@ -27,7 +27,7 @@ pub struct Register {
 #[derive(Debug)]
 enum RegisterMap<'a> {
     Unit { index: u32 },
-    Group { fields: PrefixMap<'a, Self> },
+    Group { fields: PrefixMap<&'a str, Self> },
 }
 
 #[derive(Debug)]
@@ -41,7 +41,7 @@ struct ProgramBuilder<'a> {
     functions: Vec<Function>,
     constant_to_index: Map<Box<[u8]>, u32>,
     constants: Vec<Constant>,
-    register_to_index: crate::PrefixMap<'a, (RegisterMap<'a>, TypeId)>,
+    register_to_index: crate::PrefixMap<&'a str, (RegisterMap<'a>, TypeId)>,
     registers: Vec<Register>,
     builtin_types: Map<BuiltinType, TypeId>,
     strings_buffer: Vec<u8>,
@@ -54,7 +54,7 @@ enum Type<'a> {
     Natural32,
     ConstantString,
     Enum { value_to_id: Map<&'a Str, u32> },
-    Group { fields: PrefixMap<'a, TypeId> },
+    Group { fields: PrefixMap<&'a str, TypeId> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
