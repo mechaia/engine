@@ -1,0 +1,41 @@
+( Vector3
+& .x Natural32
+& .y Natural32
+& .z Natural32
+)
+
+( Matrix3
+& .a Vector3
+& .b Vector3
+& .c Vector3
+)
+
+## Overlapping with vector group is invalid
+#$ vector.x T
+#$ vector. T
+#$ vectorx T
+#$ vector T
+##
+
+$ vector Vector3
+$ matrix Matrix3
+
+## Overlapping with vector group is invalid
+#$ vector.x T
+#$ vector. T
+#$ vectorx T
+#$ vector T
+##
+
+> start
++ vector.x 7
++ vector.y 8
++ vector.z 9
++ matrix.a.x 1
++ matrix.a.y 2
++ matrix.a.z 3
++ matrix.b.x 4
++ matrix.b.y 5
++ matrix.b.z 6
+. matrix.c vector
+<
