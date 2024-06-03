@@ -1,7 +1,7 @@
 ( Vector3
-& .x Natural32
-& .y Natural32
-& .z Natural32
+& .x Integer32
+& .y Integer32
+& .z Integer32
 )
 
 ( Matrix3
@@ -9,6 +9,36 @@
 & .b Vector3
 & .c Vector3
 )
+
+_ Vector3 0
++ .x 0
++ .y 0
++ .z 0
+-
+
+_ Vector3 1
++ .x 1
++ .y 1
++ .z 1
+-
+
+_ Vector3 X
++ .x 1
++ .y 0
++ .z 0
+-
+
+_ Vector3 Y
++ .x 0
++ .y 1
++ .z 0
+-
+
+_ Vector3 Z
++ .x 0
++ .y 0
++ .z 1
+-
 
 ## Overlapping with vector group is invalid
 #$ vector.x T
@@ -34,8 +64,6 @@ $ matrix Matrix3
 + matrix.a.x 1
 + matrix.a.y 2
 + matrix.a.z 3
-+ matrix.b.x 4
-+ matrix.b.y 5
-+ matrix.b.z 6
++ matrix.b 1
 . matrix.c vector
 <

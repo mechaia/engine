@@ -16,6 +16,7 @@ type Map<K, V> = std::collections::HashMap<K, V>;
 #[derive(Debug, Default)]
 pub struct Collection {
     types: Map<Str, Type>,
+    constants: Map<Str, Map<Str, Map<Str, Str>>>,
     registers: PrefixMap<Str, Str>,
     switches: Map<Str, Switch>,
     functions: Map<Str, Function>,
@@ -112,9 +113,7 @@ impl Collection {
         f("Natural32", BuiltinType::Natural32);
 
         let mut f = |k: &str, v: &str| {
-            self.registers
-                .try_insert(k.into(), v.into())
-                .unwrap();
+            self.registers.try_insert(k.into(), v.into()).unwrap();
         };
         f("write_constant_string_value", "ConstantString");
         f("write_character_value", "Natural32");
@@ -146,8 +145,16 @@ impl Collection {
             BUILTIN_WRITE_CHARACTER,
             &[(In, "write_character_value")],
         );
-        f("write_integer32", BUILTIN_WRITE_INTEGER32, &[(In, "write_integer32_value")]);
-        f("write_natural32", BUILTIN_WRITE_NATURAL32, &[(In, "write_natural32_value")]);
+        f(
+            "write_integer32",
+            BUILTIN_WRITE_INTEGER32,
+            &[(In, "write_integer32_value")],
+        );
+        f(
+            "write_natural32",
+            BUILTIN_WRITE_NATURAL32,
+            &[(In, "write_natural32_value")],
+        );
         f("write_newline", BUILTIN_WRITE_NEWLINE, &[]);
 
         Ok(())
@@ -156,14 +163,16 @@ impl Collection {
     pub fn parse_text(&mut self, prefix: &str, text: &str) -> Result<(), Error> {
         let mut lines = text.lines();
         while let Some(line) = lines.next() {
-            let line = line.split('#').next().unwrap_or("");
-            let line = line.trim_end();
-            let Ok((word, line)) = next_word(line) else {
+            let line = trim_line(line);
+            if line.is_empty() {
                 continue;
-            };
+            }
+            let (word, line) = next_word(line).map_err(|kind| Error { kind })?;
             match word {
                 "%" => self.line_parse_type(line),
                 "(" => self.line_parse_group(&mut lines, line),
+                "_" => self.line_parse_constant(&mut lines, line),
+                "~" => self.line_parse_alias(line),
                 "$" => self.line_parse_register(line),
                 "[" => self.line_parse_switch(&mut lines, line),
                 ">" => self.line_parse_function(&mut lines, line),
@@ -195,10 +204,8 @@ impl Collection {
         let mut fields = Vec::<(Str, Str)>::new();
 
         loop {
-            let line = lines.next().ok_or(ErrorKind::ExpectedLine)?.trim_end();
-            let Ok((word, line)) = next_word(line) else {
-                continue;
-            };
+            let line = next_line(lines)?;
+            let (word, line) = next_word(line)?;
             match word {
                 "&" => {
                     let (name, line) = next_word(line)?;
@@ -221,6 +228,43 @@ impl Collection {
             .try_insert(name.into(), Type::Group(fields.into()))
             .map(|_| ())
             .map_err(|_| todo!())
+    }
+
+    fn line_parse_constant(&mut self, lines: &mut Lines<'_>, line: &str) -> Result<(), ErrorKind> {
+        let (ty, line) = next_word(line)?;
+        let (name, line) = next_word(line)?;
+        next_eol(line)?;
+
+        let mut values = Map::new();
+
+        loop {
+            let line = next_line(lines)?;
+            let (word, line) = next_word(line)?;
+            match word {
+                "+" => {
+                    let (field, line) = next_word(line)?;
+                    let (value, line) = next_word(line)?;
+                    next_eol(line)?;
+                    values.try_insert(field.into(), value.into()).unwrap();
+                }
+                "-" => {
+                    next_eol(line)?;
+                    break;
+                }
+                tk => todo!("{tk}"),
+            }
+        }
+
+        self.constants
+            .entry(ty.into())
+            .or_default()
+            .try_insert(name.into(), values)
+            .map(|_| ())
+            .map_err(|_| todo!())
+    }
+
+    fn line_parse_alias(&mut self, line: &str) -> Result<(), ErrorKind> {
+        todo!()
     }
 
     fn line_parse_register(&mut self, line: &str) -> Result<(), ErrorKind> {
@@ -296,10 +340,8 @@ impl Collection {
         let mut instructions = Vec::new();
 
         let next = loop {
-            let line = lines.next().ok_or(ErrorKind::ExpectedLine)?.trim_end();
-            let Ok((word, line)) = next_word(line) else {
-                continue;
-            };
+            let line = next_line(lines)?;
+            let (word, line) = next_word(line)?;
             match word {
                 "." => {
                     let (to, line) = next_word(line)?;
@@ -335,7 +377,7 @@ impl Collection {
                     next_eol(line)?;
                     break Some(next);
                 }
-                tk => todo!(),
+                tk => todo!("{tk}"),
             }
         };
 
@@ -348,6 +390,12 @@ impl Collection {
             .try_insert(name.into(), f)
             .map(|_| ())
             .map_err(|_| todo!())
+    }
+}
+
+impl<K, V> PrefixMap<K, V> {
+    fn len(&self) -> usize {
+        self.map.len()
     }
 }
 
@@ -391,7 +439,9 @@ where
         // (2)
         use core::ops::Bound::*;
         let range = (Included(key), Unbounded);
-        let Some(x) = self.map.range::<str, _>(range).next() else { return false };
+        let Some(x) = self.map.range::<str, _>(range).next() else {
+            return false;
+        };
         x.0.borrow().starts_with(key)
     }
 
@@ -429,6 +479,20 @@ where
         }
         s
     }
+}
+
+fn next_line<'a>(lines: &mut Lines<'a>) -> Result<&'a str, ErrorKind> {
+    loop {
+        let line = lines.next().ok_or(ErrorKind::ExpectedLine)?;
+        let line = trim_line(line);
+        if !line.is_empty() {
+            return Ok(line);
+        }
+    }
+}
+
+fn trim_line(line: &str) -> &str {
+    line.split('#').next().unwrap_or("").trim_end()
 }
 
 fn next_word(s: &str) -> Result<(&str, &str), ErrorKind> {
@@ -527,7 +591,7 @@ mod test {
                         }
                         id => todo!("{id}"),
                     }
-                },
+                }
             }
         }
         todo!();

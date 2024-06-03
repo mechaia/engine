@@ -66,8 +66,14 @@ impl WordVM {
             registers_size += words_for_bits(reg.bits);
         }
 
-        let sys_to_registers = program.sys_to_registers.iter()
-            .map(|v| v.iter().map(|i| register_offsets[usize::try_from(*i).unwrap()]).collect())
+        let sys_to_registers = program
+            .sys_to_registers
+            .iter()
+            .map(|v| {
+                v.iter()
+                    .map(|i| register_offsets[usize::try_from(*i).unwrap()])
+                    .collect()
+            })
             .collect();
 
         let mut constants_size = 0;
@@ -146,7 +152,9 @@ impl WordVM {
     }
 
     pub fn sys_registers(&self, id: u32) -> &[u32] {
-        self.sys_to_registers.get(usize::try_from(id).unwrap()).map_or(&[], |v| &**v)
+        self.sys_to_registers
+            .get(usize::try_from(id).unwrap())
+            .map_or(&[], |v| &**v)
     }
 
     pub fn strings_buffer(&self) -> &[u8] {
@@ -233,9 +241,7 @@ impl fmt::Debug for WordVM {
                     let address = op >> 4;
                     write!(f, "CALL    {address}")?
                 }
-                OP4_RET => {
-                    f.write_str("RET\n")?
-                }
+                OP4_RET => f.write_str("RET\n")?,
                 op => f.write_str("??? {op}")?,
             }
             f.write_str("\n")?;
