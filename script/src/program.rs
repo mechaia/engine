@@ -7,6 +7,7 @@ use {
 pub struct Program {
     pub(crate) constants: Box<[Constant]>,
     pub(crate) registers: Box<[Register]>,
+    pub(crate) array_registers: Box<[ArrayRegister]>,
     pub(crate) functions: Box<[Function]>,
     pub(crate) strings_buffer: Box<[u8]>,
     pub(crate) sys_to_registers: Box<[Box<[u32]>]>,
@@ -20,6 +21,12 @@ pub struct Constant {
 #[derive(Debug)]
 pub struct Register {
     pub bits: u32,
+}
+
+#[derive(Debug)]
+pub struct ArrayRegister {
+    pub bits: u32,
+    pub length: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -44,11 +51,19 @@ struct ProgramBuilder<'a> {
     functions: Vec<Function>,
     constant_to_index: Map<Box<[u8]>, u32>,
     constants: Vec<Constant>,
-    register_to_index: crate::PrefixMap<&'a str, (RegisterMap<'a>, TypeId)>,
+    register_to_index: PrefixMap<&'a str, (RegisterMap<'a>, TypeId)>,
     registers: Vec<Register>,
+    array_register_to_index: PrefixMap<&'a str, (RegisterMap<'a>, TypeId, TypeId)>,
+    array_registers: Vec<ArrayRegister>,
     builtin_types: Map<BuiltinType, TypeId>,
     strings_buffer: Vec<u8>,
     sys_to_registers: Map<u32, Vec<u32>>,
+}
+
+#[derive(Debug)]
+struct FunctionBuilder<'a, 'b> {
+    program: &'b mut ProgramBuilder<'a>,
+    instructions: Vec<Instruction>,
 }
 
 #[derive(Debug)]
@@ -69,6 +84,18 @@ pub(crate) enum Instruction {
     Move { to: u32, from: u32 },
     /// Set register value based on value in constants map.
     Set { to: u32, from: u32 },
+    /// Copy a register value to an array element.
+    ToArray {
+        index: u32,
+        array: u32,
+        register: u32,
+    },
+    /// Copy an array element value to a register.
+    FromArray {
+        index: u32,
+        array: u32,
+        register: u32,
+    },
     /// Jump and push return address.
     Call { address: u32 },
     /// Pop and return to popped address.
@@ -94,6 +121,7 @@ impl Program {
         builder.collect_types(collection)?;
         builder.collect_group_constants(collection)?;
         builder.collect_registers(collection)?;
+        builder.collect_array_registers(collection)?;
         builder.collect_functions(collection, entry, &stub_entry)?;
 
         let len = builder
@@ -111,6 +139,7 @@ impl Program {
         Ok(Self {
             constants: builder.constants.into(),
             registers: builder.registers.into(),
+            array_registers: builder.array_registers.into(),
             functions: builder.functions.into(),
             strings_buffer: builder.strings_buffer.into(),
             sys_to_registers,
@@ -138,6 +167,16 @@ impl fmt::Debug for Instruction {
         match self {
             Self::Move { to, from } => write!(f, "MOVE    {to} {from}"),
             Self::Set { to, from } => write!(f, "SET     {to} {from}"),
+            Self::ToArray {
+                index,
+                array,
+                register,
+            } => write!(f, "ARRAY   {array}@{index} <- {register}"),
+            Self::FromArray {
+                index,
+                array,
+                register,
+            } => write!(f, "ARRAY   {array}@{index} -> {register}"),
             Self::Call { address } => write!(f, "CALL    {address}"),
             Self::Return => f.write_str("RETURN"),
             Self::Jump { address } => write!(f, "JUMP    {address}"),
@@ -213,7 +252,6 @@ impl<'a> ProgramBuilder<'a> {
 
     fn collect_registers(&mut self, collection: &'a Collection) -> Result<(), Error> {
         for (name, ty) in collection.registers.iter() {
-            let i = u32::try_from(self.registers.len()).unwrap();
             let ty = self.types_to_index[ty];
             let regmap = self.expand_register_group(ty)?;
             self.register_to_index
@@ -261,7 +299,63 @@ impl<'a> ProgramBuilder<'a> {
             };
         };
 
-        dbg!(&regmap);
+        Ok(regmap)
+    }
+
+    fn collect_array_registers(&mut self, collection: &'a Collection) -> Result<(), Error> {
+        for (name, (index_ty, value_ty)) in collection.array_registers.iter() {
+            let index_ty = self.types_to_index[index_ty];
+            let value_ty = self.types_to_index[value_ty];
+            let length = self.types[index_ty.0 as usize].value_count().unwrap();
+            let regmap = self.expand_array_register_group(value_ty, length)?;
+            self.array_register_to_index
+                .try_insert(name, (regmap, index_ty, value_ty))
+                .unwrap();
+        }
+        Ok(())
+    }
+
+    fn expand_array_register_group(
+        &mut self,
+        mut ty: TypeId,
+        length: u32,
+    ) -> Result<RegisterMap<'a>, Error> {
+        // fuck this mutable borrow shit
+        // per-field borrowing when?
+        let mut stack = Vec::new();
+
+        let regmap = 'l: loop {
+            match &self.types[usize::try_from(ty.0).unwrap()] {
+                Type::Group { fields } => {
+                    let mut it = fields.iter().map(|(a, b)| (*a, *b));
+                    if let Some((name, ty_f)) = it.next() {
+                        ty = ty_f;
+                        stack.push((PrefixMap::default(), it, name));
+                    }
+                    continue 'l;
+                }
+                tyty => {
+                    let index = u32::try_from(self.array_registers.len()).unwrap();
+                    let bits = tyty.bit_size();
+                    self.array_registers.push(ArrayRegister { bits, length });
+
+                    let mut regmap = RegisterMap::Unit { index };
+
+                    while let Some((mut fields, mut it, name)) = stack.pop() {
+                        fields.try_insert(name, regmap).unwrap();
+                        if let Some((name, ty_f)) = it.next() {
+                            ty = ty_f;
+                            stack.push((fields, it, name));
+                            continue 'l;
+                        } else {
+                            regmap = RegisterMap::Group { fields }
+                        }
+                    }
+
+                    break 'l regmap;
+                }
+            };
+        };
 
         Ok(regmap)
     }
@@ -300,100 +394,30 @@ impl<'a> ProgramBuilder<'a> {
                     instructions: instrs,
                     next,
                 } => {
-                    let mut instructions = Vec::new();
+                    let mut builder = FunctionBuilder {
+                        program: self,
+                        instructions: Default::default(),
+                    };
 
                     for instr in instrs.iter() {
                         match instr {
-                            crate::Instruction::Set { to, value } => {
-                                let (reg, ty) = self.register(to)?;
-
-                                fn f<'a>(
-                                    slf: &mut ProgramBuilder<'a>,
-                                    instructions: &mut Vec<Instruction>,
-                                    reg: &RegisterMap<'_>,
-                                    ty: TypeId,
-                                    value: &'a Str,
-                                ) -> Result<(), Error> {
-                                    match reg {
-                                        &RegisterMap::Unit { index: to } => {
-                                            let from = slf.get_or_add_const(ty, value)?;
-                                            instructions.push(Instruction::Set { to, from });
-                                        }
-                                        RegisterMap::Group { fields } => {
-                                            let csts = &slf.group_constants[ty.0 as usize];
-                                            let csts = &csts[value];
-                                            assert_eq!(fields.len(), csts.len());
-
-                                            let Type::Group { fields: ty_fields } =
-                                                &slf.types[ty.0 as usize]
-                                            else {
-                                                todo!()
-                                            };
-
-                                            //FIXME
-                                            let csts = csts.clone();
-                                            let ty_fields = ty_fields.clone();
-
-                                            for (((_, r), (_, tyty)), c) in
-                                                fields.iter().zip(ty_fields.iter()).zip(csts.iter())
-                                            {
-                                                f(slf, instructions, r, *tyty, *c)?;
-                                            }
-                                        }
-                                    }
-                                    Ok(())
-                                }
-
-                                // FIXME
-                                let reg = reg.clone();
-                                f(self, &mut instructions, &reg, ty, value)?;
-                            }
-                            crate::Instruction::Move { to, from } => {
-                                let (to, to_ty) = self.register(to)?;
-                                let (from, from_ty) = self.register(from)?;
-                                if to_ty != from_ty {
-                                    dbg!(&self.types, to_ty, from_ty);
-                                    todo!()
-                                }
-
-                                fn f(
-                                    instructions: &mut Vec<Instruction>,
-                                    to: &RegisterMap<'_>,
-                                    from: &RegisterMap<'_>,
-                                ) {
-                                    use RegisterMap::*;
-                                    match (to, from) {
-                                        (&Unit { index: to }, &Unit { index: from }) => {
-                                            instructions.push(Instruction::Move { to, from });
-                                        }
-                                        (Group { fields: to }, Group { fields: from }) => {
-                                            for ((k1, to), (k2, from)) in to.iter().zip(from.iter())
-                                            {
-                                                debug_assert_eq!(k1, k2);
-                                                f(instructions, to, from);
-                                            }
-                                        }
-                                        _ => todo!(),
-                                    }
-                                }
-
-                                f(&mut instructions, to, from);
-                            }
-                            crate::Instruction::Call { function } => {
-                                let address = self.function(function)?;
-                                instructions.push(Instruction::Call { address });
-                            }
+                            crate::Instruction::Set { to, value } => builder.set(to, value)?,
+                            crate::Instruction::Move { to, from } => builder.move_(to, from)?,
+                            crate::Instruction::ToArray {
+                                index,
+                                array,
+                                register,
+                            } => builder.to_array(index, array, register)?,
+                            crate::Instruction::FromArray {
+                                index,
+                                array,
+                                register,
+                            } => builder.from_array(index, array, register)?,
+                            crate::Instruction::Call { function } => builder.call(function)?,
                         }
                     }
 
-                    if let Some(f) = next.as_ref() {
-                        let address = self.function(f)?;
-                        instructions.push(Instruction::Jump { address })
-                    } else {
-                        instructions.push(Instruction::Return)
-                    }
-
-                    Function(instructions.into())
+                    Function(builder.finish(next)?.into())
                 }
                 crate::Function::Builtin { id, registers } => {
                     let id = *id;
@@ -487,6 +511,30 @@ impl<'a> ProgramBuilder<'a> {
         }
 
         Ok((reg, ty))
+    }
+
+    fn array_register(&self, name: &'a Str) -> Result<(&RegisterMap<'a>, TypeId, TypeId), Error> {
+        let (mut reg, index_ty, mut value_ty, mut post) = self
+            .array_register_to_index
+            .get(name)
+            .map(|((x, y, z), w)| (x, *y, *z, w))
+            .ok_or_else(|| Error {
+                kind: ErrorKind::RegisterNotFound(name.to_string()),
+            })?;
+
+        while post != "" {
+            let RegisterMap::Group { fields } = reg else {
+                unreachable!()
+            };
+            let tyty = &self.types[usize::try_from(value_ty.0).unwrap()];
+            let Type::Group { fields: ty_fields } = tyty else {
+                unreachable!()
+            };
+            value_ty = *ty_fields.get(post).unwrap().0;
+            (reg, post) = fields.get(post).unwrap();
+        }
+
+        Ok((reg, index_ty, value_ty))
     }
 
     fn function(&self, name: &Str) -> Result<u32, Error> {
@@ -633,6 +681,157 @@ impl<'a> ProgramBuilder<'a> {
     }
 }
 
+impl<'a, 'b> FunctionBuilder<'a, 'b> {
+    fn set(&mut self, to: &'a Str, value: &'a Str) -> Result<(), Error> {
+        let (reg, ty) = self.program.register(to)?;
+        // FIXME
+        let reg = reg.clone();
+        self.set_recursive(&reg, ty, value)
+    }
+
+    fn set_recursive(
+        &mut self,
+        reg: &RegisterMap<'a>,
+        ty: TypeId,
+        value: &'a Str,
+    ) -> Result<(), Error> {
+        match reg {
+            &RegisterMap::Unit { index: to } => {
+                let from = self.program.get_or_add_const(ty, value)?;
+                self.instructions.push(Instruction::Set { to, from });
+            }
+            RegisterMap::Group { fields } => {
+                let csts = &self.program.group_constants[ty.0 as usize];
+                let csts = &csts[value];
+                assert_eq!(fields.len(), csts.len());
+
+                let Type::Group { fields: ty_fields } = &self.program.types[ty.0 as usize] else {
+                    todo!()
+                };
+
+                //FIXME
+                let csts = csts.clone();
+                let ty_fields = ty_fields.clone();
+
+                for (((_, r), (_, tyty)), c) in fields.iter().zip(ty_fields.iter()).zip(csts.iter())
+                {
+                    self.set_recursive(r, *tyty, *c)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn move_(&mut self, to: &'a Str, from: &'a Str) -> Result<(), Error> {
+        let (to, to_ty) = self.program.register(to)?;
+        let (from, from_ty) = self.program.register(from)?;
+        if to_ty != from_ty {
+            dbg!(&self.program.types, to_ty, from_ty);
+            todo!()
+        }
+
+        fn f(instructions: &mut Vec<Instruction>, to: &RegisterMap<'_>, from: &RegisterMap<'_>) {
+            use RegisterMap::*;
+            match (to, from) {
+                (&Unit { index: to }, &Unit { index: from }) => {
+                    instructions.push(Instruction::Move { to, from });
+                }
+                (Group { fields: to }, Group { fields: from }) => {
+                    for ((k1, to), (k2, from)) in to.iter().zip(from.iter()) {
+                        debug_assert_eq!(k1, k2);
+                        f(instructions, to, from);
+                    }
+                }
+                _ => todo!(),
+            }
+        }
+
+        f(&mut self.instructions, to, from);
+        Ok(())
+    }
+
+    fn to_array(&mut self, index: &'a Str, array: &'a Str, register: &'a Str) -> Result<(), Error> {
+        let (index, index_ty) = self.program.register(index)?;
+        let (array, array_index_ty, array_ty) = self.program.array_register(array)?;
+        let (register, register_ty) = self.program.register(register)?;
+
+        assert_eq!(index_ty, array_index_ty);
+        assert_eq!(array_ty, register_ty);
+
+        Self::array_recursive(&mut self.instructions, true, index, array, register)
+    }
+
+    fn from_array(
+        &mut self,
+        index: &'a Str,
+        array: &'a Str,
+        register: &'a Str,
+    ) -> Result<(), Error> {
+        let (index, index_ty) = self.program.register(index)?;
+        let (array, array_index_ty, array_ty) = self.program.array_register(array)?;
+        let (register, register_ty) = self.program.register(register)?;
+
+        assert_eq!(index_ty, array_index_ty);
+        assert_eq!(array_ty, register_ty);
+
+        Self::array_recursive(&mut self.instructions, false, index, array, register)
+    }
+
+    fn array_recursive(
+        instructions: &mut Vec<Instruction>,
+        is_to: bool,
+        index: &RegisterMap<'a>,
+        array: &RegisterMap<'a>,
+        register: &RegisterMap<'a>,
+    ) -> Result<(), Error> {
+        use RegisterMap::*;
+        match (array, register) {
+            (&Unit { index: array }, &Unit { index: register }) => {
+                let &RegisterMap::Unit { index } = index else {
+                    todo!("group indices")
+                };
+                instructions.push(if is_to {
+                    Instruction::ToArray {
+                        index,
+                        array,
+                        register,
+                    }
+                } else {
+                    Instruction::FromArray {
+                        index,
+                        array,
+                        register,
+                    }
+                });
+            }
+            (Group { fields: array }, Group { fields: register }) => {
+                for ((k1, array), (k2, register)) in array.iter().zip(register.iter()) {
+                    debug_assert_eq!(k1, k2);
+                    Self::array_recursive(instructions, is_to, index, array, register)?;
+                }
+            }
+            _ => todo!(),
+        }
+        Ok(())
+    }
+
+    fn call(&mut self, function: &'a Str) -> Result<(), Error> {
+        let address = self.program.function(function)?;
+        self.instructions.push(Instruction::Call { address });
+        Ok(())
+    }
+
+    fn finish(mut self, next: &'a Option<Str>) -> Result<Vec<Instruction>, Error> {
+        if let Some(f) = next.as_ref() {
+            let address = self.program.function(f)?;
+            self.instructions.push(Instruction::Jump { address })
+        } else {
+            self.instructions.push(Instruction::Return)
+        }
+        Ok(self.instructions)
+    }
+}
+
 impl<'a> Type<'a> {
     /// Minimum size in bits.
     pub fn bit_size(&self) -> u32 {
@@ -651,5 +850,13 @@ impl<'a> Type<'a> {
     /// Minimum size in bytes.
     pub fn byte_size(&self) -> u32 {
         (self.bit_size() + 7) / 8
+    }
+
+    pub fn value_count(&self) -> Option<u32> {
+        match self {
+            Self::Integer32 | Self::Natural32 | Self::ConstantString => None,
+            Self::Enum { value_to_id } => Some(value_to_id.len().try_into().unwrap()),
+            Self::Group { fields } => todo!(),
+        }
     }
 }

@@ -1,6 +1,6 @@
 use {
     crate::{
-        program::{Constant, Function, Instruction},
+        program::{Constant, Function, Instruction, Register},
         Map, Program,
     },
     core::fmt,
@@ -54,16 +54,25 @@ const OP4_CALL: u32 = 4;
 const OP4_RET: u32 = 5;
 const OP4_SYS: u32 = 6;
 
+const OP4_ARRAY_STORE: u32 = 7;
+const OP4_ARRAY_LOAD: u32 = 8;
+
 impl WordVM {
     pub fn from_program(program: &Program) -> Self {
         let mut encoder = OpEncoder::default();
 
         let mut registers_size = 0;
         let mut register_offsets = Vec::new();
+        let mut array_register_offsets = Vec::new();
 
         for reg in program.registers.iter() {
             register_offsets.push(registers_size);
             registers_size += words_for_bits(reg.bits);
+        }
+
+        for reg in program.array_registers.iter() {
+            array_register_offsets.push(registers_size);
+            registers_size += words_for_bits(reg.bits) * reg.length;
         }
 
         let sys_to_registers = program
@@ -91,11 +100,22 @@ impl WordVM {
                 .unwrap();
             for instr in f.0.iter() {
                 let r = |i: u32| register_offsets[i as usize];
+                let ar = |i: u32| array_register_offsets[i as usize];
                 let c = |i: u32| constant_offsets[i as usize];
                 let l = |i: u32| words_for_bits(program.registers[i as usize].bits);
                 match instr {
                     &Instruction::Move { to, from } => encoder.op_move(r(from), r(to), l(to)),
                     &Instruction::Set { to, from } => encoder.op_set(c(from), r(to), l(to)),
+                    &Instruction::ToArray {
+                        index,
+                        array,
+                        register,
+                    } => encoder.op_array_store(r(index), ar(array), r(register), l(register)),
+                    &Instruction::FromArray {
+                        index,
+                        array,
+                        register,
+                    } => encoder.op_array_load(r(index), ar(array), r(register), l(register)),
                     &Instruction::Call { address } => encoder.op_call(address),
                     &Instruction::Return => {
                         encoder.op_ret();
@@ -181,6 +201,7 @@ impl fmt::Debug for WordVM {
                 }
                 OP4_JUMP | OP4_CALL | OP4_RET | OP4_SYS => {}
                 OP4_MOVE | OP4_JUMPEQ => i += 2,
+                OP4_ARRAY_LOAD | OP4_ARRAY_STORE => i += 3,
                 // break so the error is visible
                 _ => {
                     cst_offset = self.strings_offset;
@@ -242,7 +263,17 @@ impl fmt::Debug for WordVM {
                     write!(f, "CALL    {address}")?
                 }
                 OP4_RET => f.write_str("RET\n")?,
-                op => f.write_str("??? {op}")?,
+                o @ OP4_ARRAY_LOAD | o @ OP4_ARRAY_STORE => {
+                    let postfix = ["LD", "ST"][usize::from(o == OP4_ARRAY_STORE)];
+                    let count = op >> 4;
+                    match (next_u32(), next_u32(), next_u32()) {
+                        (Some(index), Some(array), Some(register)) => {
+                            write!(f, "ARRAY{postfix} {count} {index} {array} {register}")?
+                        }
+                        _ => write!(f, "ARRAY{postfix} {count} ???")?,
+                    }
+                }
+                op => write!(f, "??? {op}")?,
             }
             f.write_str("\n")?;
         }
@@ -361,6 +392,28 @@ impl WordVMState {
                 let id = op >> 4;
                 return Ok(Yield::Sys { id });
             }
+            OP4_ARRAY_LOAD => {
+                let count = (op >> 4) as usize;
+                let index = next_u32()? as usize;
+                let base = next_u32()? as usize;
+                let register = next_u32()? as usize;
+
+                let from = base + (index * count);
+                let to = register;
+
+                self.registers.copy_within(from..from + count, to);
+            }
+            OP4_ARRAY_STORE => {
+                let count = (op >> 4) as usize;
+                let index = next_u32()? as usize;
+                let base = next_u32()? as usize;
+                let register = next_u32()? as usize;
+
+                let to = base + (index * count);
+                let from = register;
+
+                self.registers.copy_within(from..from + count, to);
+            }
             _ => return Err(Error),
         }
         Ok(Yield::Preempt)
@@ -427,6 +480,26 @@ impl OpEncoder {
     fn op_sys(&mut self, id: u32) {
         assert!(id <= u32::MAX >> 4);
         self.instructions.extend_from_slice(&[OP4_SYS | (id << 4)]);
+    }
+
+    fn op_array_load(&mut self, index: u32, base: u32, register: u32, count: u32) {
+        assert!(count <= u32::MAX >> 4);
+        self.instructions.extend_from_slice(&[
+            OP4_ARRAY_LOAD | (count << 4),
+            index,
+            base,
+            register,
+        ]);
+    }
+
+    fn op_array_store(&mut self, index: u32, base: u32, register: u32, count: u32) {
+        assert!(count <= u32::MAX >> 4);
+        self.instructions.extend_from_slice(&[
+            OP4_ARRAY_STORE | (count << 4),
+            index,
+            base,
+            register,
+        ]);
     }
 
     fn finish(mut self, constants: &[Constant], strings_buffer: &[u8]) -> (Box<[u32]>, u32) {

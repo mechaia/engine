@@ -18,6 +18,8 @@ pub struct Collection {
     types: Map<Str, Type>,
     constants: Map<Str, Map<Str, Map<Str, Str>>>,
     registers: PrefixMap<Str, Str>,
+    /// (Index, Value)
+    array_registers: PrefixMap<Str, (Str, Str)>,
     switches: Map<Str, Switch>,
     functions: Map<Str, Function>,
 }
@@ -87,9 +89,27 @@ enum Mode {
 
 #[derive(Debug)]
 enum Instruction {
-    Move { to: Str, from: Str },
-    Set { to: Str, value: Str },
-    Call { function: Str },
+    Move {
+        to: Str,
+        from: Str,
+    },
+    Set {
+        to: Str,
+        value: Str,
+    },
+    ToArray {
+        index: Str,
+        array: Str,
+        register: Str,
+    },
+    FromArray {
+        index: Str,
+        array: Str,
+        register: Str,
+    },
+    Call {
+        function: Str,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -174,6 +194,7 @@ impl Collection {
                 "_" => self.line_parse_constant(&mut lines, line),
                 "~" => self.line_parse_alias(line),
                 "$" => self.line_parse_register(line),
+                "@" => self.line_parse_register_array(line),
                 "[" => self.line_parse_switch(&mut lines, line),
                 ">" => self.line_parse_function(&mut lines, line),
                 tk => todo!("{tk}"),
@@ -269,10 +290,21 @@ impl Collection {
 
     fn line_parse_register(&mut self, line: &str) -> Result<(), ErrorKind> {
         let (name, line) = next_word(line)?;
-        let (ty, line) = next_word(line)?;
+        let (value, line) = next_word(line)?;
         next_eol(line)?;
         self.registers
-            .try_insert(name.into(), ty.into())
+            .try_insert(name.into(), value.into())
+            .map_err(|_| ErrorKind::OverlappingRegister(name.into()))
+            .map(|_| ())
+    }
+
+    fn line_parse_register_array(&mut self, line: &str) -> Result<(), ErrorKind> {
+        let (name, line) = next_word(line)?;
+        let (index, line) = next_word(line)?;
+        let (value, line) = next_word(line)?;
+        next_eol(line)?;
+        self.array_registers
+            .try_insert(name.into(), (index.into(), value.into()))
             .map_err(|_| ErrorKind::OverlappingRegister(name.into()))
             .map(|_| ())
     }
@@ -359,6 +391,28 @@ impl Collection {
                     instructions.push(Instruction::Set {
                         to: to.into(),
                         value: value.into(),
+                    });
+                }
+                "{" => {
+                    let (index, line) = next_word(line)?;
+                    let (array, line) = next_word(line)?;
+                    let (register, line) = next_word(line)?;
+                    next_eol(line)?;
+                    instructions.push(Instruction::ToArray {
+                        index: index.into(),
+                        array: array.into(),
+                        register: register.into(),
+                    });
+                }
+                "}" => {
+                    let (index, line) = next_word(line)?;
+                    let (register, line) = next_word(line)?;
+                    let (array, line) = next_word(line)?;
+                    next_eol(line)?;
+                    instructions.push(Instruction::FromArray {
+                        index: index.into(),
+                        array: array.into(),
+                        register: register.into(),
                     });
                 }
                 "|" => {
@@ -540,7 +594,8 @@ mod test {
         col.add_default_builtins().unwrap();
         //let s = include_str!("../examples/hello_world.pil");
         //let s = include_str!("../examples/union.pil");
-        let s = include_str!("../examples/group.pil");
+        //let s = include_str!("../examples/group.pil");
+        let s = include_str!("../examples/array.pil");
         col.parse_text("", s).unwrap();
         dbg!(&col);
         let mut prog = super::Program::from_collection(&col, &"start".to_string().into()).unwrap();

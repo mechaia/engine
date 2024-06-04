@@ -1,0 +1,16 @@
+% I 0 1 2
+% J A B C D
+
+@ array_i I Natural32
+@ array_j J Natural32
+
+$ i I
+$ j J
+$ x Natural32
+
+> start
++ x 42
++ i 1
+{ i array_i x
+} i write_natural32_value array_i
+= write_natural32
