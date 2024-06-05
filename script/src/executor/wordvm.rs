@@ -20,6 +20,7 @@ pub struct WordVMState {
     stack: Box<[u32]>,
     stack_index: u32,
     instruction_index: u32,
+    array_index: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -54,8 +55,16 @@ const OP4_CALL: u32 = 4;
 const OP4_RET: u32 = 5;
 const OP4_SYS: u32 = 6;
 
-const OP4_ARRAY_STORE: u32 = 7;
-const OP4_ARRAY_LOAD: u32 = 8;
+/// index = base
+const OP4_ARRAY_SET: u32 = 7;
+/// index += stride * [register]
+const OP4_ARRAY_ADD: u32 = 8;
+/// [register] = [index]
+/// index += 1
+const OP4_ARRAY_LOAD: u32 = 9;
+/// [index] = [register]
+/// index += 1
+const OP4_ARRAY_STORE: u32 = 10;
 
 impl WordVM {
     pub fn from_program(program: &Program) -> Self {
@@ -85,14 +94,6 @@ impl WordVM {
             })
             .collect();
 
-        let mut constants_size = 0;
-        let mut constant_offsets = Vec::new();
-
-        for cst in program.constants.iter() {
-            constant_offsets.push(constants_size);
-            constants_size += words_for_bytes(cst.value.len() as u32);
-        }
-
         let mut conv = |i, f: &Function| {
             encoder
                 .label_to_address
@@ -101,21 +102,46 @@ impl WordVM {
             for instr in f.0.iter() {
                 let r = |i: u32| register_offsets[i as usize];
                 let ar = |i: u32| array_register_offsets[i as usize];
-                let c = |i: u32| constant_offsets[i as usize];
                 let l = |i: u32| words_for_bits(program.registers[i as usize].bits);
                 match instr {
-                    &Instruction::Move { to, from } => encoder.op_move(r(from), r(to), l(to)),
-                    &Instruction::Set { to, from } => encoder.op_set(c(from), r(to), l(to)),
+                    &Instruction::Move { to, from } => {
+                        for i in 0..l(to) {
+                            encoder.op_move(r(from) + i, r(to) + i)
+                        }
+                    }
+                    &Instruction::Set { to, from } => {
+                        let constant = &program.constants[from as usize];
+                        for (i, w) in constant.value.chunks(4).enumerate() {
+                            let mut ww = [0; 4];
+                            ww[..w.len()].copy_from_slice(w);
+                            let value = u32::from_ne_bytes(ww);
+                            encoder.op_set(value, r(to) + i as u32);
+                        }
+                    }
                     &Instruction::ToArray {
                         index,
                         array,
                         register,
-                    } => encoder.op_array_store(r(index), ar(array), r(register), l(register)),
+                    } => {
+                        let count = l(register);
+                        encoder.op_array_set(ar(array));
+                        encoder.op_array_add(count, r(index));
+                        for _ in 0..count {
+                            encoder.op_array_store(r(register));
+                        }
+                    }
                     &Instruction::FromArray {
                         index,
                         array,
                         register,
-                    } => encoder.op_array_load(r(index), ar(array), r(register), l(register)),
+                    } => {
+                        let count = l(register);
+                        encoder.op_array_set(ar(array));
+                        encoder.op_array_add(count, r(index));
+                        for _ in 0..count {
+                            encoder.op_array_load(r(register));
+                        }
+                    }
                     &Instruction::Call { address } => encoder.op_call(address),
                     &Instruction::Return => {
                         encoder.op_ret();
@@ -149,8 +175,7 @@ impl WordVM {
             conv(i, f);
         }
 
-        let (instructions, strings_offset) =
-            encoder.finish(&program.constants, &program.strings_buffer);
+        let (instructions, strings_offset) = encoder.finish(&program.strings_buffer);
         let stack_size = program.max_call_depth(0);
 
         Self {
@@ -168,6 +193,7 @@ impl WordVM {
             stack: vec![0; self.stack_size as usize].into(),
             stack_index: 0,
             instruction_index: 0,
+            array_index: 0,
         }
     }
 
@@ -184,40 +210,13 @@ impl WordVM {
 
 impl fmt::Debug for WordVM {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut cst_offset = self.strings_offset;
-
-        let mut i = 0;
-        loop {
-            let Some(op) = self.instructions[..cst_offset as usize].get(i) else {
-                break;
-            };
-            i += 1;
-            match *op & 15 {
-                OP4_SET => {
-                    if let Some(&from) = self.instructions.get(i) {
-                        cst_offset = cst_offset.min(from)
-                    }
-                    i += 2;
-                }
-                OP4_JUMP | OP4_CALL | OP4_RET | OP4_SYS => {}
-                OP4_MOVE | OP4_JUMPEQ => i += 2,
-                OP4_ARRAY_LOAD | OP4_ARRAY_STORE => i += 3,
-                // break so the error is visible
-                _ => {
-                    cst_offset = self.strings_offset;
-                    break;
-                }
-            }
-        }
-
         write!(f, "stack size: {}\n", self.stack_size)?;
         write!(f, "registers size: {}\n", self.registers_size)?;
-        write!(f, "constants offset: {cst_offset}\n")?;
         write!(f, "strings offset: {}\n", self.strings_offset)?;
         f.write_str("instructions:\n")?;
         let mut i = 0;
         loop {
-            let Some(op) = self.instructions[..cst_offset as usize].get(i) else {
+            let Some(op) = self.instructions[..self.strings_offset as usize].get(i) else {
                 break;
             };
             write!(f, "{i:>7}: ")?;
@@ -228,17 +227,17 @@ impl fmt::Debug for WordVM {
             };
             match *op & 15 {
                 OP4_MOVE => {
-                    let count = op >> 4;
-                    match (next_u32(), next_u32()) {
-                        (Some(from), Some(to)) => write!(f, "MOVE    {count} {from} {to}")?,
-                        _ => write!(f, "MOVE    {count} ???")?,
+                    let to = op >> 4;
+                    match next_u32() {
+                        Some(from) => write!(f, "MOVE    {to} {from}")?,
+                        _ => write!(f, "MOVE    {to} ???")?,
                     }
                 }
                 OP4_SET => {
-                    let count = op >> 4;
-                    match (next_u32(), next_u32()) {
-                        (Some(from), Some(to)) => write!(f, "SET     {count} {from} {to}")?,
-                        _ => write!(f, "SET     {count} ???")?,
+                    let to = op >> 4;
+                    match next_u32() {
+                        Some(value) => write!(f, "SET     {to} {value}")?,
+                        _ => write!(f, "SET     {to} ???")?,
                     }
                 }
                 OP4_SYS => {
@@ -263,31 +262,19 @@ impl fmt::Debug for WordVM {
                     write!(f, "CALL    {address}")?
                 }
                 OP4_RET => f.write_str("RET\n")?,
-                o @ OP4_ARRAY_LOAD | o @ OP4_ARRAY_STORE => {
-                    let postfix = ["LD", "ST"][usize::from(o == OP4_ARRAY_STORE)];
-                    let count = op >> 4;
-                    match (next_u32(), next_u32(), next_u32()) {
-                        (Some(index), Some(array), Some(register)) => {
-                            write!(f, "ARRAY{postfix} {count} {index} {array} {register}")?
-                        }
-                        _ => write!(f, "ARRAY{postfix} {count} ???")?,
+                OP4_ARRAY_SET => write!(f, "A.SET   {}", op >> 4)?,
+                OP4_ARRAY_ADD => {
+                    if let Some(register) = next_u32() {
+                        write!(f, "A.ADD   {} {}", op >> 4, register)?
+                    } else {
+                        write!(f, "A.ADD   {} ???", op >> 4)?
                     }
                 }
+                OP4_ARRAY_LOAD => write!(f, "A.LOAD  {}", op >> 4)?,
+                OP4_ARRAY_STORE => write!(f, "A.STORE {}", op >> 4)?,
                 op => write!(f, "??? {op}")?,
             }
             f.write_str("\n")?;
-        }
-
-        f.write_str("constants (right to left):\n")?;
-        for c in self
-            .instructions
-            .iter()
-            .take(self.strings_offset as usize)
-            .skip(i)
-        {
-            let c = c.to_le();
-            write!(f, "{i:>7}: {c:08x}\n")?;
-            i += 1;
         }
 
         f.write_str("strings buffer: ")?;
@@ -322,44 +309,15 @@ impl WordVMState {
         };
         match op & 15 {
             OP4_MOVE => {
-                let count = (op >> 4) as usize;
-                let from = next_u32()? as usize;
-                let to = next_u32()? as usize;
-                if to > self.registers.len() || from > self.registers.len() {
-                    return Err(Error);
-                }
-                let (from, to) = if from < to {
-                    // from --- to
-                    let (a, b) = self.registers.split_at_mut(to);
-                    let a = a.get_mut(from..).ok_or(Error)?;
-                    (a, b)
-                } else {
-                    // to -- from
-                    let (a, b) = self.registers.split_at_mut(from);
-                    let a = a.get_mut(to..).ok_or(Error)?;
-                    (b, a)
-                };
-                let from = from.get(..count).ok_or(Error)?;
-                let to = to.get_mut(..count).ok_or(Error)?;
-                to.copy_from_slice(from);
+                let to = op >> 4;
+                let from = next_u32()?;
+                let x = self.register(from)?;
+                self.set_register(to, x)?;
             }
             OP4_SET => {
-                let count = (op >> 4) as usize;
-                let from = next_u32()? as usize;
-                let to = next_u32()? as usize;
-
-                let from = vm
-                    .instructions
-                    .get(from..)
-                    .and_then(|s| s.get(..count))
-                    .ok_or(Error)?;
-                let to = self
-                    .registers
-                    .get_mut(to..)
-                    .and_then(|s| s.get_mut(..count))
-                    .ok_or(Error)?;
-
-                to.copy_from_slice(from);
+                let to = op >> 4;
+                let value = next_u32()?;
+                self.set_register(to, value)?;
             }
             OP4_JUMP => {
                 self.instruction_index = op >> 4;
@@ -392,27 +350,20 @@ impl WordVMState {
                 let id = op >> 4;
                 return Ok(Yield::Sys { id });
             }
+            OP4_ARRAY_SET => self.array_index = op >> 4,
+            OP4_ARRAY_ADD => {
+                let i = next_u32()?;
+                self.array_index += (op >> 4) * self.register(i)?;
+            }
             OP4_ARRAY_LOAD => {
-                let count = (op >> 4) as usize;
-                let index = next_u32()? as usize;
-                let base = next_u32()? as usize;
-                let register = next_u32()? as usize;
-
-                let from = base + (index * count);
-                let to = register;
-
-                self.registers.copy_within(from..from + count, to);
+                let x = self.register(self.array_index)?;
+                self.set_register(op >> 4, x)?;
+                self.array_index += 1;
             }
             OP4_ARRAY_STORE => {
-                let count = (op >> 4) as usize;
-                let index = next_u32()? as usize;
-                let base = next_u32()? as usize;
-                let register = next_u32()? as usize;
-
-                let to = base + (index * count);
-                let from = register;
-
-                self.registers.copy_within(from..from + count, to);
+                let x = self.register(op >> 4)?;
+                self.set_register(self.array_index, x)?;
+                self.array_index += 1;
             }
             _ => return Err(Error),
         }
@@ -436,19 +387,14 @@ impl OpEncoder {
         self.instructions.len().try_into().unwrap()
     }
 
-    fn op_move(&mut self, from: u32, to: u32, count: u32) {
-        assert!(count <= u32::MAX >> 4);
+    fn op_move(&mut self, from: u32, to: u32) {
         self.instructions
-            .extend_from_slice(&[OP4_MOVE | (count << 4), from, to]);
+            .extend_from_slice(&[OP4_MOVE | (to << 4), from]);
     }
 
-    fn op_set(&mut self, from: u32, to: u32, count: u32) {
-        assert!(count <= u32::MAX >> 4);
-        self.resolve_constant
-            .try_insert(self.cur() + 1, ())
-            .unwrap();
+    fn op_set(&mut self, value: u32, to: u32) {
         self.instructions
-            .extend_from_slice(&[OP4_SET | (count << 4), from, to]);
+            .extend_from_slice(&[OP4_SET | (to << 4), value]);
     }
 
     fn op_call(&mut self, address: u32) {
@@ -482,27 +428,28 @@ impl OpEncoder {
         self.instructions.extend_from_slice(&[OP4_SYS | (id << 4)]);
     }
 
-    fn op_array_load(&mut self, index: u32, base: u32, register: u32, count: u32) {
-        assert!(count <= u32::MAX >> 4);
-        self.instructions.extend_from_slice(&[
-            OP4_ARRAY_LOAD | (count << 4),
-            index,
-            base,
-            register,
-        ]);
+    fn op_array_set(&mut self, base: u32) {
+        assert!(base <= u32::MAX >> 4);
+        self.instructions.push(OP4_ARRAY_SET | (base << 4))
     }
 
-    fn op_array_store(&mut self, index: u32, base: u32, register: u32, count: u32) {
-        assert!(count <= u32::MAX >> 4);
-        self.instructions.extend_from_slice(&[
-            OP4_ARRAY_STORE | (count << 4),
-            index,
-            base,
-            register,
-        ]);
+    fn op_array_add(&mut self, stride: u32, index: u32) {
+        assert!(stride <= u32::MAX >> 4);
+        self.instructions
+            .extend_from_slice(&[OP4_ARRAY_ADD | (stride << 4), index]);
     }
 
-    fn finish(mut self, constants: &[Constant], strings_buffer: &[u8]) -> (Box<[u32]>, u32) {
+    fn op_array_load(&mut self, register: u32) {
+        assert!(register <= u32::MAX >> 4);
+        self.instructions.push(OP4_ARRAY_LOAD | (register << 4))
+    }
+
+    fn op_array_store(&mut self, register: u32) {
+        assert!(register <= u32::MAX >> 4);
+        self.instructions.push(OP4_ARRAY_STORE | (register << 4))
+    }
+
+    fn finish(mut self, strings_buffer: &[u8]) -> (Box<[u32]>, u32) {
         for (&address, (resolve, label)) in self.resolve_label.iter() {
             let addr = self.label_to_address[label];
             match resolve {
@@ -516,10 +463,6 @@ impl OpEncoder {
         let pc = self.cur();
         for (&i, ()) in self.resolve_constant.iter() {
             self.instructions[i as usize] += pc;
-        }
-
-        for cst in constants.iter() {
-            extend_u32_from_u8(&mut self.instructions, &cst.value);
         }
 
         let strings_offset = self.cur();

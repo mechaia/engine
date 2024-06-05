@@ -306,7 +306,7 @@ impl<'a> ProgramBuilder<'a> {
         for (name, (index_ty, value_ty)) in collection.array_registers.iter() {
             let index_ty = self.types_to_index[index_ty];
             let value_ty = self.types_to_index[value_ty];
-            let length = self.types[index_ty.0 as usize].value_count().unwrap();
+            let length = self.type_value_count(index_ty).unwrap();
             let regmap = self.expand_array_register_group(value_ty, length)?;
             self.array_register_to_index
                 .try_insert(name, (regmap, index_ty, value_ty))
@@ -679,6 +679,20 @@ impl<'a> ProgramBuilder<'a> {
 
         Ok(n)
     }
+
+    fn type_value_count(&self, ty: TypeId) -> Option<u32> {
+        match &self.types[ty.0 as usize] {
+            Type::Integer32 | Type::Natural32 | Type::ConstantString => None,
+            Type::Enum { value_to_id } => Some(value_to_id.len().try_into().unwrap()),
+            Type::Group { fields } => {
+                let mut s = 1u32;
+                for (_, &v) in fields.iter() {
+                    s = s.checked_mul(self.type_value_count(v)?)?;
+                }
+                Some(s)
+            }
+        }
+    }
 }
 
 impl<'a, 'b> FunctionBuilder<'a, 'b> {
@@ -850,13 +864,5 @@ impl<'a> Type<'a> {
     /// Minimum size in bytes.
     pub fn byte_size(&self) -> u32 {
         (self.bit_size() + 7) / 8
-    }
-
-    pub fn value_count(&self) -> Option<u32> {
-        match self {
-            Self::Integer32 | Self::Natural32 | Self::ConstantString => None,
-            Self::Enum { value_to_id } => Some(value_to_id.len().try_into().unwrap()),
-            Self::Group { fields } => todo!(),
-        }
     }
 }
