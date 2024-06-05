@@ -81,7 +81,7 @@ impl WordVM {
 
         for reg in program.array_registers.iter() {
             array_register_offsets.push(registers_size);
-            registers_size += words_for_bits(reg.bits) * reg.length;
+            registers_size += words_for_bits(reg.bits) * reg.dimensions.iter().product::<u32>();
         }
 
         let sys_to_registers = program
@@ -99,9 +99,9 @@ impl WordVM {
                 .label_to_address
                 .try_insert(i, encoder.cur())
                 .unwrap();
-            for instr in f.0.iter() {
+            let mut instructions = f.0.iter();
+            while let Some(instr) = instructions.next() {
                 let r = |i: u32| register_offsets[i as usize];
-                let ar = |i: u32| array_register_offsets[i as usize];
                 let l = |i: u32| words_for_bits(program.registers[i as usize].bits);
                 match instr {
                     &Instruction::Move { to, from } => {
@@ -118,30 +118,32 @@ impl WordVM {
                             encoder.op_set(value, r(to) + i as u32);
                         }
                     }
-                    &Instruction::ToArray {
-                        index,
-                        array,
-                        register,
-                    } => {
-                        let count = l(register);
-                        encoder.op_array_set(ar(array));
-                        encoder.op_array_add(count, r(index));
-                        for _ in 0..count {
-                            encoder.op_array_store(r(register));
+                    &Instruction::ArrayAccess { array } => {
+                        encoder.op_array_set(array_register_offsets[array as usize]);
+                        let array = &program.array_registers[array as usize];
+                        let element_size = words_for_bits(array.bits);
+                        let mut stride = element_size * array.dimensions.iter().product::<u32>();
+                        for i in 0.. {
+                            match instructions.next().unwrap() {
+                                &Instruction::ArrayIndex { index } => {
+                                    stride /= array.dimensions[i];
+                                    encoder.op_array_add(stride, r(index));
+                                }
+                                &Instruction::ArrayLoad { register } => {
+                                    encoder.op_array_load(r(register));
+                                    break;
+                                }
+                                &Instruction::ArrayStore { register } => {
+                                    encoder.op_array_store(r(register));
+                                    break;
+                                }
+                                _ => todo!(),
+                            }
                         }
                     }
-                    &Instruction::FromArray {
-                        index,
-                        array,
-                        register,
-                    } => {
-                        let count = l(register);
-                        encoder.op_array_set(ar(array));
-                        encoder.op_array_add(count, r(index));
-                        for _ in 0..count {
-                            encoder.op_array_load(r(register));
-                        }
-                    }
+                    Instruction::ArrayIndex { .. }
+                    | Instruction::ArrayLoad { .. }
+                    | Instruction::ArrayStore { .. } => todo!(),
                     &Instruction::Call { address } => encoder.op_call(address),
                     &Instruction::Return => {
                         encoder.op_ret();

@@ -1,6 +1,7 @@
 use {
     crate::{BuiltinType, Collection, Error, ErrorKind, Map, PrefixMap, Str},
     core::fmt,
+    std::rc::Rc,
 };
 
 #[derive(Debug)]
@@ -26,7 +27,7 @@ pub struct Register {
 #[derive(Debug)]
 pub struct ArrayRegister {
     pub bits: u32,
-    pub length: u32,
+    pub dimensions: Rc<[u32]>,
 }
 
 #[derive(Clone, Debug)]
@@ -84,18 +85,18 @@ pub(crate) enum Instruction {
     Move { to: u32, from: u32 },
     /// Set register value based on value in constants map.
     Set { to: u32, from: u32 },
+    /// Begin array access.
+    ArrayAccess { array: u32 },
+    /// Index next for current array access.
+    ArrayIndex { index: u32 },
     /// Copy a register value to an array element.
-    ToArray {
-        index: u32,
-        array: u32,
-        register: u32,
-    },
+    ///
+    /// Ends the current array access.
+    ArrayStore { register: u32 },
     /// Copy an array element value to a register.
-    FromArray {
-        index: u32,
-        array: u32,
-        register: u32,
-    },
+    ///
+    /// Ends the current array access.
+    ArrayLoad { register: u32 },
     /// Jump and push return address.
     Call { address: u32 },
     /// Pop and return to popped address.
@@ -167,16 +168,10 @@ impl fmt::Debug for Instruction {
         match self {
             Self::Move { to, from } => write!(f, "MOVE    {to} {from}"),
             Self::Set { to, from } => write!(f, "SET     {to} {from}"),
-            Self::ToArray {
-                index,
-                array,
-                register,
-            } => write!(f, "ARRAY   {array}@{index} <- {register}"),
-            Self::FromArray {
-                index,
-                array,
-                register,
-            } => write!(f, "ARRAY   {array}@{index} -> {register}"),
+            Self::ArrayAccess { array } => write!(f, "A.ACCES {array}"),
+            Self::ArrayIndex { index } => write!(f, "A.INDEX {index}"),
+            Self::ArrayStore { register } => write!(f, "A.STORE {register}"),
+            Self::ArrayLoad { register } => write!(f, "A.LOAD  {register}"),
             Self::Call { address } => write!(f, "CALL    {address}"),
             Self::Return => f.write_str("RETURN"),
             Self::Jump { address } => write!(f, "JUMP    {address}"),
@@ -306,8 +301,8 @@ impl<'a> ProgramBuilder<'a> {
         for (name, (index_ty, value_ty)) in collection.array_registers.iter() {
             let index_ty = self.types_to_index[index_ty];
             let value_ty = self.types_to_index[value_ty];
-            let length = self.type_value_count(index_ty).unwrap();
-            let regmap = self.expand_array_register_group(value_ty, length)?;
+            let dimensions = self.type_index_dimensions(index_ty).unwrap().into();
+            let regmap = self.expand_array_register_group(value_ty, dimensions)?;
             self.array_register_to_index
                 .try_insert(name, (regmap, index_ty, value_ty))
                 .unwrap();
@@ -318,7 +313,7 @@ impl<'a> ProgramBuilder<'a> {
     fn expand_array_register_group(
         &mut self,
         mut ty: TypeId,
-        length: u32,
+        dimensions: Rc<[u32]>,
     ) -> Result<RegisterMap<'a>, Error> {
         // fuck this mutable borrow shit
         // per-field borrowing when?
@@ -337,7 +332,9 @@ impl<'a> ProgramBuilder<'a> {
                 tyty => {
                     let index = u32::try_from(self.array_registers.len()).unwrap();
                     let bits = tyty.bit_size();
-                    self.array_registers.push(ArrayRegister { bits, length });
+                    let dimensions = dimensions.clone();
+                    self.array_registers
+                        .push(ArrayRegister { bits, dimensions });
 
                     let mut regmap = RegisterMap::Unit { index };
 
@@ -680,16 +677,16 @@ impl<'a> ProgramBuilder<'a> {
         Ok(n)
     }
 
-    fn type_value_count(&self, ty: TypeId) -> Option<u32> {
+    fn type_index_dimensions(&self, ty: TypeId) -> Option<Vec<u32>> {
         match &self.types[ty.0 as usize] {
             Type::Integer32 | Type::Natural32 | Type::ConstantString => None,
-            Type::Enum { value_to_id } => Some(value_to_id.len().try_into().unwrap()),
+            Type::Enum { value_to_id } => Some([u32::try_from(value_to_id.len()).unwrap()].into()),
             Type::Group { fields } => {
-                let mut s = 1u32;
+                let mut dim = Vec::new();
                 for (_, &v) in fields.iter() {
-                    s = s.checked_mul(self.type_value_count(v)?)?;
+                    dim.extend(self.type_index_dimensions(v)?);
                 }
-                Some(s)
+                Some(dim)
             }
         }
     }
@@ -801,21 +798,12 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         use RegisterMap::*;
         match (array, register) {
             (&Unit { index: array }, &Unit { index: register }) => {
-                let &RegisterMap::Unit { index } = index else {
-                    todo!("group indices")
-                };
+                instructions.push(Instruction::ArrayAccess { array });
+                Self::array_recursive_index(instructions, index)?;
                 instructions.push(if is_to {
-                    Instruction::ToArray {
-                        index,
-                        array,
-                        register,
-                    }
+                    Instruction::ArrayStore { register }
                 } else {
-                    Instruction::FromArray {
-                        index,
-                        array,
-                        register,
-                    }
+                    Instruction::ArrayLoad { register }
                 });
             }
             (Group { fields: array }, Group { fields: register }) => {
@@ -825,6 +813,21 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
                 }
             }
             _ => todo!(),
+        }
+        Ok(())
+    }
+
+    fn array_recursive_index(
+        instructions: &mut Vec<Instruction>,
+        index: &RegisterMap<'a>,
+    ) -> Result<(), Error> {
+        match index {
+            &RegisterMap::Unit { index } => instructions.push(Instruction::ArrayIndex { index }),
+            RegisterMap::Group { fields } => {
+                for (_, v) in fields.iter() {
+                    Self::array_recursive_index(instructions, v)?
+                }
+            }
         }
         Ok(())
     }
