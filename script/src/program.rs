@@ -37,7 +37,29 @@ enum RegisterMap<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct Function(pub Box<[Instruction]>);
+pub(crate) enum Function {
+    Block(FunctionBlock),
+    Switch(FunctionSwitch),
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct FunctionBlock {
+    pub instructions: Box<[Instruction]>,
+    pub next: Option<u32>,
+}
+
+#[derive(Debug)]
+pub(crate) struct FunctionSwitch {
+    pub register: u32,
+    pub cases: Box<[SwitchCase]>,
+    pub default: Option<u32>,
+}
+
+#[derive(Debug)]
+pub(crate) struct SwitchCase {
+    pub constant: u32,
+    pub function: u32,
+}
 
 #[derive(Debug, Default)]
 struct ProgramBuilder<'a> {
@@ -99,18 +121,8 @@ pub(crate) enum Instruction {
     ArrayLoad { register: u32 },
     /// Jump and push return address.
     Call { address: u32 },
-    /// Pop and return to popped address.
-    Return,
-    /// Jump to address.
-    Jump { address: u32 },
-    /// Jump if a register matches a constant.
-    JumpEq {
-        address: u32,
-        register: u32,
-        constant: u32,
-    },
     /// Call a builtin function.
-    SystemCall { id: u32 },
+    Sys { id: u32 },
 }
 
 impl Program {
@@ -148,18 +160,26 @@ impl Program {
     }
 
     pub fn max_call_depth(&self, entry: u32) -> u32 {
-        self.functions[entry as usize]
-            .0
-            .iter()
-            .map(|i| match i {
-                &Instruction::Call { address } => 1 + self.max_call_depth(address),
-                &Instruction::Jump { address } | &Instruction::JumpEq { address, .. } => {
-                    self.max_call_depth(address)
-                }
-                _ => 0,
-            })
-            .max()
-            .unwrap_or(0)
+        match &self.functions[entry as usize] {
+            Function::Block(f) => f
+                .instructions
+                .iter()
+                .map(|i| match i {
+                    &Instruction::Call { address } => 1 + self.max_call_depth(address),
+                    _ => 0,
+                })
+                .chain(f.next.map(|a| self.max_call_depth(a)))
+                .max()
+                .unwrap_or(0),
+            Function::Switch(s) => {
+                s.cases
+                    .iter()
+                    .map(|c| self.max_call_depth(c.function))
+                    .max()
+                    .unwrap_or(0)
+                    + 1
+            }
+        }
     }
 }
 
@@ -173,14 +193,7 @@ impl fmt::Debug for Instruction {
             Self::ArrayStore { register } => write!(f, "A.STORE {register}"),
             Self::ArrayLoad { register } => write!(f, "A.LOAD  {register}"),
             Self::Call { address } => write!(f, "CALL    {address}"),
-            Self::Return => f.write_str("RETURN"),
-            Self::Jump { address } => write!(f, "JUMP    {address}"),
-            Self::JumpEq {
-                address,
-                register,
-                constant,
-            } => write!(f, "JUMPEQ  {address} {register} {constant}"),
-            Self::SystemCall { id } => write!(f, "SYS     {id:?}"),
+            Self::Sys { id } => write!(f, "SYS     {id:?}"),
         }
     }
 }
@@ -378,12 +391,10 @@ impl<'a> ProgramBuilder<'a> {
             i += 1;
         }
 
-        self.functions.push(Function(
-            [Instruction::Jump {
-                address: self.function(entry)?,
-            }]
-            .into(),
-        ));
+        self.functions.push(Function::Block(FunctionBlock {
+            instructions: Default::default(),
+            next: Some(self.function(entry)?),
+        }));
 
         for (_name, func) in collection.functions.iter() {
             let f = match func {
@@ -414,7 +425,7 @@ impl<'a> ProgramBuilder<'a> {
                         }
                     }
 
-                    Function(builder.finish(next)?.into())
+                    builder.finish(next)?
                 }
                 crate::Function::Builtin { id, registers } => {
                     let id = *id;
@@ -429,49 +440,44 @@ impl<'a> ProgramBuilder<'a> {
                         })
                         .try_collect()?;
                     self.sys_to_registers.try_insert(id, regs).unwrap();
-                    Function([Instruction::SystemCall { id }, Instruction::Return].into())
+                    FunctionBlock {
+                        instructions: [Instruction::Sys { id }].into(),
+                        next: None,
+                    }
                 }
             };
-            self.functions.push(f);
+            self.functions.push(Function::Block(f));
         }
 
-        for (_name, func) in collection.switches.iter() {
-            let mut instructions = Vec::new();
-            let (register, ty) = self.register(&func.register)?;
-            let ty = &self.types[ty.0 as usize];
-            match ty {
+        for (_name, switch) in collection.switches.iter() {
+            let (register, ty) = self.register(&switch.register)?;
+            match &self.types[ty.0 as usize] {
                 Type::Integer32 => todo!(),
                 Type::Natural32 => todo!(),
                 Type::ConstantString => todo!(),
                 Type::Enum { value_to_id } => {
-                    let all = value_to_id
-                        .keys()
-                        .all(|k| func.branches.iter().any(|(kk, _)| kk == &**k));
-                    if !all && func.default.is_none() {
+                    let &RegisterMap::Unit { index: register } = register else {
                         todo!()
+                    };
+                    let mut cases = Vec::new();
+                    for (i, (value, next)) in switch.branches.iter().enumerate() {
+                        let constant = self.get_or_add_const(ty, value)?;
+                        let function = self.function(next)?;
+                        cases.push(SwitchCase { constant, function });
                     }
-                    for (i, (value, next)) in func.branches.iter().enumerate() {
-                        let address = self.function(next)?;
-                        let constant = *value_to_id.get(value).ok_or_else(|| todo!())?;
-                        if func.default.is_some() || i < func.branches.len() - 1 {
-                            match register {
-                                &RegisterMap::Unit { index: register } => {
-                                    instructions.push(Instruction::JumpEq {
-                                        address,
-                                        register,
-                                        constant,
-                                    });
-                                }
-                                RegisterMap::Group { fields } => todo!(),
-                            }
-                        } else {
-                            instructions.push(Instruction::Jump { address });
-                        }
-                    }
+                    let default = switch
+                        .default
+                        .as_ref()
+                        .map(|s| self.function(s))
+                        .transpose()?;
+                    self.functions.push(Function::Switch(FunctionSwitch {
+                        register,
+                        cases: cases.into(),
+                        default,
+                    }));
                 }
                 Type::Group { .. } => todo!(),
             }
-            self.functions.push(Function(instructions.into()));
         }
 
         Ok(())
@@ -838,14 +844,15 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         Ok(())
     }
 
-    fn finish(mut self, next: &'a Option<Str>) -> Result<Vec<Instruction>, Error> {
-        if let Some(f) = next.as_ref() {
-            let address = self.program.function(f)?;
-            self.instructions.push(Instruction::Jump { address })
-        } else {
-            self.instructions.push(Instruction::Return)
-        }
-        Ok(self.instructions)
+    fn finish(mut self, next: &'a Option<Str>) -> Result<FunctionBlock, Error> {
+        let next = next
+            .as_ref()
+            .map(|n| self.program.function(n))
+            .transpose()?;
+        Ok(FunctionBlock {
+            instructions: self.instructions.into(),
+            next,
+        })
     }
 }
 
@@ -867,5 +874,11 @@ impl<'a> Type<'a> {
     /// Minimum size in bytes.
     pub fn byte_size(&self) -> u32 {
         (self.bit_size() + 7) / 8
+    }
+}
+
+impl Default for Function {
+    fn default() -> Self {
+        Self::Block(Default::default())
     }
 }

@@ -20,60 +20,48 @@ pub fn simple(program: &mut Program) {
         .iter()
         .zip(&func_refcounts)
         .map(|(f, rc)| {
-            if f.0.iter().any(|i| matches!(i, Instruction::JumpEq { .. })) {
-                return false;
-            }
+            let Function::Block(b) = f else { return false };
             if *rc <= 1 {
-                // FIXME loops
                 return true;
             }
-            matches!(&*f.0, [Instruction::SystemCall { .. }, Instruction::Return])
+            if b.instructions.is_empty() {
+                return true;
+            }
+            if b.next.is_none() {
+                return matches!(&*b.instructions, [Instruction::Sys { .. }] | [Instruction::Call { .. }]);
+            }
+            false
         })
         .collect::<Vec<_>>();
+
     for i in (0..program.functions.len()).rev() {
         let mut new_instrs = Vec::new();
-        'l1: for &instr in program.functions[i].0.iter() {
-            dbg!(instr);
+
+        let Function::Block(b) = &program.functions[i] else {
+            continue;
+        };
+
+        for &instr in b.instructions.iter() {
             match instr {
-                Instruction::Call { address } | Instruction::Jump { address }
-                    if should_inline[address as usize] =>
-                {
-                    let is_call = matches!(instr, Instruction::Call { .. });
-                    'l2: for &instr_2 in program.functions[address as usize].0.iter() {
-                        dbg!(instr_2);
-                        match instr_2 {
-                            Instruction::Jump { address } => {
-                                if is_call {
-                                    // replace with call so we return as original
-                                    new_instrs.push(Instruction::Call { address });
-                                    break 'l2;
-                                } else {
-                                    // keep tail call and break since all code behind this is dead
-                                    new_instrs.push(Instruction::Jump { address });
-                                    break 'l1;
-                                }
-                            }
-                            // dead end of callee
-                            Instruction::Return => {
-                                if is_call {
-                                    // not a dead end of caller, continue
-                                    break 'l2;
-                                } else {
-                                    // dead end of caller, return
-                                    new_instrs.push(Instruction::Return);
-                                    break 'l1;
-                                }
-                            }
-                            instr_2 => new_instrs.push(instr_2),
-                        }
+                Instruction::Call { address } if should_inline[address as usize] => {
+                    // TODO avoid inlining infinite loop function
+
+                    let f_2 = &program.functions[address as usize];
+                    let Function::Block(b_2) = f_2 else { todo!() };
+                    new_instrs.extend_from_slice(&b_2.instructions);
+
+                    if let Some(next_2) = b_2.next {
+                        new_instrs.push(Instruction::Call { address });
                     }
                 }
                 instr => new_instrs.push(instr),
             }
         }
-        dbg!(&program.functions[i].0);
-        dbg!(&new_instrs);
-        program.functions[i].0 = new_instrs.into()
+
+        let Function::Block(b) = &mut program.functions[i] else {
+            unreachable!()
+        };
+        b.instructions = new_instrs.into();
     }
 
     sort_post_order(program);
@@ -83,16 +71,7 @@ pub fn simple(program: &mut Program) {
 fn count_function_references(program: &Program) -> Vec<u32> {
     let mut func_refcounts = vec![0; program.functions.len()];
     for f in program.functions.iter() {
-        for i in f.0.iter() {
-            match i {
-                &Instruction::Call { address }
-                | &Instruction::Jump { address }
-                | &Instruction::JumpEq { address, .. } => {
-                    func_refcounts[address as usize] += 1;
-                }
-                _ => {}
-            }
-        }
+        visit_funcref(f, |x| func_refcounts[x as usize] += 1);
     }
     func_refcounts[0] = u32::MAX;
     func_refcounts
@@ -103,20 +82,14 @@ fn count_function_references(program: &Program) -> Vec<u32> {
 /// This also removes unreferenced functions.
 fn sort_post_order(program: &mut Program) {
     fn f(new_list: &mut Vec<u32>, program: &Program, index: u32, visited: &mut BitVec) {
+        if visited.get(index as usize).unwrap() {
+            return;
+        }
         visited.set(index as usize, true);
         new_list.push(index);
-        for instr in program.functions[index as usize].0.iter() {
-            match *instr {
-                Instruction::Call { address }
-                | Instruction::Jump { address }
-                | Instruction::JumpEq { address, .. } => {
-                    if !visited.get(address as usize).unwrap() {
-                        f(new_list, program, address, visited);
-                    }
-                }
-                _ => {}
-            }
-        }
+        visit_funcref(&program.functions[index as usize], |x| {
+            f(new_list, program, x, visited)
+        });
     }
 
     let mut visited = BitVec::filled(program.functions.len(), false);
@@ -129,23 +102,68 @@ fn sort_post_order(program: &mut Program) {
         remap_table[*k as usize] = i as u32;
     }
 
-    dbg!(&remap_table);
-
     program.functions = new_list
         .iter()
-        .map(|&i| {
-            let mut instrs = mem::take(&mut program.functions[i as usize].0);
-            for instr in instrs.iter_mut().rev() {
-                match instr {
-                    Instruction::Call { address }
-                    | Instruction::Jump { address }
-                    | Instruction::JumpEq { address, .. } => {
-                        *address = remap_table[*address as usize];
-                    }
-                    _ => {}
-                }
-            }
-            Function(instrs)
+        .map(|&index| {
+            let mut f = mem::take(&mut program.functions[index as usize]);
+            visit_funcref_mut(&mut f, |x| *x = remap_table[*x as usize]);
+            f
         })
         .collect();
+}
+
+/// Visit all function references of the given function, i.e. calls and jumps.
+fn visit_funcref<F: FnMut(u32)>(function: &Function, mut f: F) {
+    match function {
+        Function::Block(b) => {
+            if let Some(x) = b.next {
+                f(x)
+            }
+            for instr in b.instructions.iter() {
+                if let Instruction::Call { address } = instr {
+                    f(*address)
+                }
+            }
+        }
+        Function::Switch(s) => {
+            if let Some(x) = s.default {
+                f(x)
+            }
+            for c in s.cases.iter() {
+                f(c.function)
+            }
+        }
+    }
+}
+
+/// Visit all function references of the given function, i.e. calls and jumps.
+fn visit_funcref_mut<F: FnMut(&mut u32)>(function: &mut Function, mut f: F) {
+    match function {
+        Function::Block(b) => {
+            if let Some(x) = b.next.as_mut() {
+                f(x)
+            }
+            for instr in b.instructions.iter_mut() {
+                if let Instruction::Call { address } = instr {
+                    f(address)
+                }
+            }
+        }
+        Function::Switch(s) => {
+            if let Some(x) = s.default.as_mut() {
+                f(x)
+            }
+            for c in s.cases.iter_mut() {
+                f(&mut c.function)
+            }
+        }
+    }
+}
+
+fn visit_call_tree_rec(
+    new_list: &mut Vec<u32>,
+    program: &Program,
+    index: u32,
+    visited: &mut BitVec,
+) {
 }

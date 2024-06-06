@@ -1,6 +1,6 @@
 use {
     crate::{
-        program::{Constant, Function, Instruction, Register},
+        program::{Constant, Function, FunctionBlock, FunctionSwitch, Instruction, Register},
         Map, Program,
     },
     core::fmt,
@@ -21,6 +21,7 @@ pub struct WordVMState {
     stack_index: u32,
     instruction_index: u32,
     array_index: u32,
+    compare_state: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -49,22 +50,26 @@ enum Resolve {
 
 const OP4_MOVE: u32 = 0;
 const OP4_SET: u32 = 1;
-const OP4_JUMP: u32 = 2;
-const OP4_JUMPEQ: u32 = 3;
-const OP4_CALL: u32 = 4;
-const OP4_RET: u32 = 5;
-const OP4_SYS: u32 = 6;
+const OP4_COND_EQ: u32 = 2;
+const OP4_COND_ANDEQ: u32 = 3;
+const OP4_COND_JUMP: u32 = 4;
+const OP4_JUMP: u32 = 5;
+const OP4_CALL: u32 = 6;
+const OP4_RET: u32 = 7;
+const OP4_SYS: u32 = 8;
 
 /// index = base
-const OP4_ARRAY_SET: u32 = 7;
+const OP4_ARRAY_SET: u32 = 9;
 /// index += stride * [register]
-const OP4_ARRAY_ADD: u32 = 8;
+const OP4_ARRAY_ADD: u32 = 10;
 /// [register] = [index]
 /// index += 1
-const OP4_ARRAY_LOAD: u32 = 9;
+const OP4_ARRAY_LOAD: u32 = 11;
 /// [index] = [register]
 /// index += 1
-const OP4_ARRAY_STORE: u32 = 10;
+const OP4_ARRAY_STORE: u32 = 12;
+
+const OP4_UNDEF: u32 = 15;
 
 impl WordVM {
     pub fn from_program(program: &Program) -> Self {
@@ -99,75 +104,92 @@ impl WordVM {
                 .label_to_address
                 .try_insert(i, encoder.cur())
                 .unwrap();
-            let mut instructions = f.0.iter();
-            while let Some(instr) = instructions.next() {
-                let r = |i: u32| register_offsets[i as usize];
-                let l = |i: u32| words_for_bits(program.registers[i as usize].bits);
-                match instr {
-                    &Instruction::Move { to, from } => {
-                        for i in 0..l(to) {
-                            encoder.op_move(r(from) + i, r(to) + i)
+            match f {
+                Function::Block(b) => {
+                    let mut instructions = b.instructions.iter();
+                    while let Some(instr) = instructions.next() {
+                        let r = |i: u32| register_offsets[i as usize];
+                        let l = |i: u32| words_for_bits(program.registers[i as usize].bits);
+                        match instr {
+                            &Instruction::Move { to, from } => {
+                                for i in 0..l(to) {
+                                    encoder.op_move(r(from) + i, r(to) + i)
+                                }
+                            }
+                            &Instruction::Set { to, from } => {
+                                let constant = &program.constants[from as usize];
+                                for (i, w) in constant.value.chunks(4).enumerate() {
+                                    let mut ww = [0; 4];
+                                    ww[..w.len()].copy_from_slice(w);
+                                    let value = u32::from_ne_bytes(ww);
+                                    encoder.op_set(value, r(to) + i as u32);
+                                }
+                            }
+                            &Instruction::ArrayAccess { array } => {
+                                encoder.op_array_set(array_register_offsets[array as usize]);
+                                let array = &program.array_registers[array as usize];
+                                let element_size = words_for_bits(array.bits);
+                                let mut stride =
+                                    element_size * array.dimensions.iter().product::<u32>();
+                                for i in 0.. {
+                                    match instructions.next().unwrap() {
+                                        &Instruction::ArrayIndex { index } => {
+                                            stride /= array.dimensions[i];
+                                            encoder.op_array_add(stride, r(index));
+                                        }
+                                        &Instruction::ArrayLoad { register } => {
+                                            encoder.op_array_load(r(register));
+                                            break;
+                                        }
+                                        &Instruction::ArrayStore { register } => {
+                                            encoder.op_array_store(r(register));
+                                            break;
+                                        }
+                                        _ => todo!(),
+                                    }
+                                }
+                            }
+                            Instruction::ArrayIndex { .. }
+                            | Instruction::ArrayLoad { .. }
+                            | Instruction::ArrayStore { .. } => todo!(),
+                            &Instruction::Call { address } => encoder.op_call(address),
+                            &Instruction::Sys { id } => encoder.op_sys(id),
                         }
                     }
-                    &Instruction::Set { to, from } => {
-                        let constant = &program.constants[from as usize];
-                        for (i, w) in constant.value.chunks(4).enumerate() {
+                    if let Some(next) = b.next {
+                        // elide redundant jump
+                        if next != i + 1 {
+                            encoder.op_jump(next);
+                        }
+                    } else {
+                        encoder.op_ret();
+                    }
+                }
+                Function::Switch(s) => {
+                    let register = register_offsets[s.register as usize];
+                    for case in s.cases.iter() {
+                        let cst = &program.constants[case.constant as usize];
+                        for (i, w) in cst.value.chunks(4).enumerate() {
                             let mut ww = [0; 4];
+                            // FIXME endianness
                             ww[..w.len()].copy_from_slice(w);
-                            let value = u32::from_ne_bytes(ww);
-                            encoder.op_set(value, r(to) + i as u32);
-                        }
-                    }
-                    &Instruction::ArrayAccess { array } => {
-                        encoder.op_array_set(array_register_offsets[array as usize]);
-                        let array = &program.array_registers[array as usize];
-                        let element_size = words_for_bits(array.bits);
-                        let mut stride = element_size * array.dimensions.iter().product::<u32>();
-                        for i in 0.. {
-                            match instructions.next().unwrap() {
-                                &Instruction::ArrayIndex { index } => {
-                                    stride /= array.dimensions[i];
-                                    encoder.op_array_add(stride, r(index));
-                                }
-                                &Instruction::ArrayLoad { register } => {
-                                    encoder.op_array_load(r(register));
-                                    break;
-                                }
-                                &Instruction::ArrayStore { register } => {
-                                    encoder.op_array_store(r(register));
-                                    break;
-                                }
-                                _ => todo!(),
+                            let v = u32::from_ne_bytes(ww);
+                            if i == 0 {
+                                encoder.op_cond_eq(register, v)
+                            } else {
+                                encoder.op_cond_andeq(register, v)
                             }
                         }
+                        encoder.op_cond_jump(case.function);
                     }
-                    Instruction::ArrayIndex { .. }
-                    | Instruction::ArrayLoad { .. }
-                    | Instruction::ArrayStore { .. } => todo!(),
-                    &Instruction::Call { address } => encoder.op_call(address),
-                    &Instruction::Return => {
-                        encoder.op_ret();
-                        // break just in case another instruction follows
-                        break;
-                    }
-                    &Instruction::Jump { address } => {
-                        // If the target address is just behind this function,
-                        // omit this redundant jump
-                        if i + 1 != address || 1 == 0 {
-                            encoder.op_jump(address);
+                    if let Some(default) = s.default {
+                        // elide redundant jump
+                        if default != i + 1 {
+                            encoder.op_jump(default);
                         }
-                        // break just in case another instruction follows
-                        break;
+                    } else {
+                        encoder.instructions.push(OP4_UNDEF);
                     }
-                    &Instruction::JumpEq {
-                        address,
-                        register,
-                        constant,
-                    } => {
-                        // Constant value is inline, so don't map
-                        encoder.op_jumpeq(address, r(register), constant)
-                    }
-                    &Instruction::SystemCall { id } => encoder.op_sys(id),
                 }
             }
         };
@@ -196,6 +218,7 @@ impl WordVM {
             stack_index: 0,
             instruction_index: 0,
             array_index: 0,
+            compare_state: 0,
         }
     }
 
@@ -246,18 +269,29 @@ impl fmt::Debug for WordVM {
                     let id = op >> 4;
                     write!(f, "SYS     {id}")?
                 }
+                OP4_COND_EQ => {
+                    let register = op >> 4;
+                    if let Some(value) = next_u32() {
+                        write!(f, "C.EQ    {register} {value}")?
+                    } else {
+                        write!(f, "C.EQ    {register} ???")?
+                    }
+                }
+                OP4_COND_ANDEQ => {
+                    let register = op >> 4;
+                    if let Some(value) = next_u32() {
+                        write!(f, "C.ANDEQ {register} {value}")?
+                    } else {
+                        write!(f, "C.ANDEQ {register} ???")?
+                    }
+                }
+                OP4_COND_JUMP => {
+                    let address = op >> 4;
+                    write!(f, "C.JUMP  {address}")?
+                }
                 OP4_JUMP => {
                     let address = op >> 4;
                     write!(f, "JUMP    {address}\n")?
-                }
-                OP4_JUMPEQ => {
-                    let address = op >> 4;
-                    match (next_u32(), next_u32()) {
-                        (Some(register), Some(value)) => {
-                            write!(f, "JUMPEQ  {address} {register} {value}")?;
-                        }
-                        _ => write!(f, "JUMPEQ  {address} ???")?,
-                    }
                 }
                 OP4_CALL => {
                     let address = op >> 4;
@@ -274,6 +308,7 @@ impl fmt::Debug for WordVM {
                 }
                 OP4_ARRAY_LOAD => write!(f, "A.LOAD  {}", op >> 4)?,
                 OP4_ARRAY_STORE => write!(f, "A.STORE {}", op >> 4)?,
+                OP4_UNDEF => f.write_str("UNDEF\n")?,
                 op => write!(f, "??? {op}")?,
             }
             f.write_str("\n")?;
@@ -321,18 +356,25 @@ impl WordVMState {
                 let value = next_u32()?;
                 self.set_register(to, value)?;
             }
+            OP4_COND_EQ => {
+                let register = op >> 4;
+                let value = next_u32()?;
+                let x = self.register(register)?;
+                self.compare_state = u32::from(x == value);
+            }
+            OP4_COND_ANDEQ => {
+                let register = op >> 4;
+                let value = next_u32()?;
+                let x = self.register(register)?;
+                self.compare_state |= u32::from(x == value);
+            }
+            OP4_COND_JUMP => {
+                if self.compare_state != 0 {
+                    self.instruction_index = op >> 4;
+                }
+            }
             OP4_JUMP => {
                 self.instruction_index = op >> 4;
-            }
-            OP4_JUMPEQ => {
-                let address = op >> 4;
-                let register = next_u32()? as usize;
-                let value = next_u32()?;
-
-                let cur = *self.registers.get(register as usize).ok_or(Error)?;
-                if cur == value {
-                    self.instruction_index = address;
-                }
             }
             OP4_CALL => {
                 let address = op >> 4;
@@ -403,7 +445,7 @@ impl OpEncoder {
         self.resolve_label
             .try_insert(self.cur(), (Resolve::Shift4, address))
             .unwrap();
-        self.instructions.extend_from_slice(&[OP4_CALL]);
+        self.instructions.push(OP4_CALL);
     }
 
     fn op_ret(&mut self) {
@@ -414,15 +456,22 @@ impl OpEncoder {
         self.resolve_label
             .try_insert(self.cur(), (Resolve::Shift4, address))
             .unwrap();
-        self.instructions.extend_from_slice(&[OP4_JUMP]);
+        self.instructions.push(OP4_JUMP);
     }
 
-    fn op_jumpeq(&mut self, address: u32, register: u32, value: u32) {
+    fn op_cond_eq(&mut self, register: u32, value: u32) {
+        self.instructions.extend_from_slice(&[OP4_COND_EQ | (register << 4), value]);
+    }
+
+    fn op_cond_andeq(&mut self, register: u32, value: u32) {
+        self.instructions.extend_from_slice(&[OP4_COND_ANDEQ | (register << 4), value]);
+    }
+
+    fn op_cond_jump(&mut self, address: u32) {
         self.resolve_label
             .try_insert(self.cur(), (Resolve::Shift4, address))
             .unwrap();
-        self.instructions
-            .extend_from_slice(&[OP4_JUMPEQ, register, value]);
+        self.instructions.push(OP4_COND_JUMP);
     }
 
     fn op_sys(&mut self, id: u32) {
