@@ -68,6 +68,8 @@ pub fn simple(program: &mut Program) {
     }
 
     sort_pre_order(program);
+
+    remove_unused_registers(program);
 }
 
 /// Determine per-function reference counts.
@@ -163,10 +165,108 @@ fn visit_funcref_mut<F: FnMut(&mut u32)>(function: &mut Function, mut f: F) {
     }
 }
 
-fn visit_call_tree_rec(
-    new_list: &mut Vec<u32>,
-    program: &Program,
-    index: u32,
-    visited: &mut BitVec,
-) {
+/// Remove unused registers
+fn remove_unused_registers(program: &mut Program) {
+    let mut referenced = BitVec::filled(program.registers.len(), false);
+    let mut array_referenced = BitVec::filled(program.array_registers.len(), false);
+
+    for f in program.functions.iter() {
+        match f {
+            Function::Block(b) => {
+                for instr in b.instructions.iter() {
+                    match instr {
+                        &Instruction::Move { to, from } => {
+                            referenced.set(to as usize, true);
+                            referenced.set(from as usize, true);
+                        }
+                        &Instruction::ArrayAccess { array } => {
+                            array_referenced.set(array as usize, true)
+                        }
+                        Instruction::ArrayStore { register: reg }
+                        | Instruction::ArrayLoad { register: reg }
+                        | Instruction::Set { to: reg, .. }
+                        | Instruction::ArrayIndex { index: reg } => {
+                            referenced.set(*reg as usize, true)
+                        }
+                        &Instruction::Sys { id } => {
+                            for reg in program.sys_to_registers[id as usize].iter() {
+                                referenced.set(*reg as usize, true);
+                            }
+                        }
+                        Instruction::Call { .. } => {}
+                    }
+                }
+            }
+            Function::Switch(s) => {
+                referenced.set(s.register as usize, true);
+            }
+        }
+    }
+
+    let regs = mem::take(&mut program.registers).into_vec();
+    let mut new_regs = Vec::new();
+    for (b, reg) in referenced.iter().zip(regs) {
+        if b {
+            new_regs.push(reg);
+        }
+    }
+    program.registers = new_regs.into();
+
+    let regs = mem::take(&mut program.array_registers).into_vec();
+    let mut new_regs = Vec::new();
+    for (b, reg) in array_referenced.iter().zip(regs) {
+        if b {
+            new_regs.push(reg);
+        }
+    }
+    program.array_registers = new_regs.into();
+
+    let mut remap = Vec::with_capacity(referenced.len());
+    let mut array_remap = Vec::with_capacity(array_referenced.len());
+
+    let mut i = 0;
+    for b in referenced.iter() {
+        remap.push(if b { i } else { u32::MAX });
+        i += u32::from(b);
+    }
+
+    let mut i = 0;
+    for b in array_referenced.iter() {
+        array_remap.push(if b { i } else { u32::MAX });
+        i += u32::from(b);
+    }
+
+    for f in program.functions.iter_mut() {
+        match f {
+            Function::Block(b) => {
+                for instr in b.instructions.iter_mut() {
+                    match instr {
+                        Instruction::Move { to, from } => {
+                            *to = remap[*to as usize];
+                            *from = remap[*from as usize];
+                        }
+                        Instruction::ArrayAccess { array } => {
+                            *array = array_remap[*array as usize];
+                        }
+                        Instruction::ArrayStore { register: reg }
+                        | Instruction::ArrayLoad { register: reg }
+                        | Instruction::Set { to: reg, .. }
+                        | Instruction::ArrayIndex { index: reg } => {
+                            *reg = remap[*reg as usize];
+                        }
+                        Instruction::Sys { .. } | Instruction::Call { .. } => {}
+                    }
+                }
+            }
+            Function::Switch(s) => {
+                s.register = remap[s.register as usize];
+            }
+        }
+    }
+
+    for sys in program.sys_to_registers.iter_mut() {
+        for reg in sys.iter_mut() {
+            *reg = remap[*reg as usize];
+        }
+    }
 }

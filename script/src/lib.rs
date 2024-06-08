@@ -592,8 +592,8 @@ mod test {
     fn stuff() {
         let mut col = super::Collection::default();
         col.add_default_builtins().unwrap();
-        //let s = include_str!("../examples/hello_world.pil");
-        let s = include_str!("../examples/union.pil");
+        let s = include_str!("../examples/hello_world.pil");
+        //let s = include_str!("../examples/union.pil");
         //let s = include_str!("../examples/group.pil");
         //let s = include_str!("../examples/array.pil");
         col.parse_text("", s).unwrap();

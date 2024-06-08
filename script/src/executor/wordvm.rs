@@ -94,7 +94,11 @@ impl WordVM {
             .iter()
             .map(|v| {
                 v.iter()
-                    .map(|i| register_offsets[usize::try_from(*i).unwrap()])
+                    .map(|i| if *i == u32::MAX {
+                        u32::MAX
+                    } else {
+                        register_offsets[usize::try_from(*i).unwrap()]
+                    })
                     .collect()
             })
             .collect();
