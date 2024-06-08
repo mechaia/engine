@@ -460,11 +460,13 @@ impl OpEncoder {
     }
 
     fn op_cond_eq(&mut self, register: u32, value: u32) {
-        self.instructions.extend_from_slice(&[OP4_COND_EQ | (register << 4), value]);
+        self.instructions
+            .extend_from_slice(&[OP4_COND_EQ | (register << 4), value]);
     }
 
     fn op_cond_andeq(&mut self, register: u32, value: u32) {
-        self.instructions.extend_from_slice(&[OP4_COND_ANDEQ | (register << 4), value]);
+        self.instructions
+            .extend_from_slice(&[OP4_COND_ANDEQ | (register << 4), value]);
     }
 
     fn op_cond_jump(&mut self, address: u32) {

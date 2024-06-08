@@ -9,7 +9,7 @@ use {
 
 /// Very basic and fast optimizer.
 pub fn simple(program: &mut Program) {
-    sort_post_order(program);
+    sort_pre_order(program);
 
     let func_refcounts = count_function_references(program);
 
@@ -28,7 +28,10 @@ pub fn simple(program: &mut Program) {
                 return true;
             }
             if b.next.is_none() {
-                return matches!(&*b.instructions, [Instruction::Sys { .. }] | [Instruction::Call { .. }]);
+                return matches!(
+                    &*b.instructions,
+                    [Instruction::Sys { .. }] | [Instruction::Call { .. }]
+                );
             }
             false
         })
@@ -64,7 +67,7 @@ pub fn simple(program: &mut Program) {
         b.instructions = new_instrs.into();
     }
 
-    sort_post_order(program);
+    sort_pre_order(program);
 }
 
 /// Determine per-function reference counts.
@@ -77,10 +80,10 @@ fn count_function_references(program: &Program) -> Vec<u32> {
     func_refcounts
 }
 
-/// Sort functions in post-order, starting from the first function.
+/// Sort functions in pre-order, starting from the first function.
 ///
 /// This also removes unreferenced functions.
-fn sort_post_order(program: &mut Program) {
+fn sort_pre_order(program: &mut Program) {
     fn f(new_list: &mut Vec<u32>, program: &Program, index: u32, visited: &mut BitVec) {
         if visited.get(index as usize).unwrap() {
             return;

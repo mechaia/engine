@@ -340,7 +340,7 @@ impl Collection {
                     next_eol(line)?;
                     break Some(name);
                 }
-                tk => todo!(),
+                tk => todo!("{tk}"),
             }
         };
 
@@ -621,9 +621,6 @@ mod test {
                         super::BUILTIN_WRITE_CONSTANT_STRING => {
                             let offt = exec.register(regs[0]).unwrap();
                             let len = exec.register(regs[0] + 1).unwrap();
-                            if offt == 42 {
-                                dbg!(&exec);
-                            }
                             let s = &vm.strings_buffer()[offt as usize..][..len as usize];
                             let s = core::str::from_utf8(s).unwrap();
                             dbg!(s);
