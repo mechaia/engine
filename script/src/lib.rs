@@ -1,11 +1,12 @@
 #![feature(slice_split_once, map_try_insert, iterator_try_collect)]
 #![deny(unused_must_use, elided_lifetimes_in_paths)]
 
-use std::{borrow::Borrow, collections::BTreeMap, hash::Hash, str::Lines};
+use std::{borrow::Borrow, collections::BTreeMap, hash::Hash};
 
 mod executor;
 pub mod optimize;
 mod program;
+pub mod sys;
 
 //pub use util::str::PoolBoxU8 as Str;
 pub use program::Program;
@@ -33,13 +34,13 @@ pub(crate) enum Type {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum BuiltinType {
-    Integer32,
-    Natural32,
+    Int(u8),
     ConstantString,
 }
 
 #[derive(Debug)]
 pub struct Error {
+    line: usize,
     kind: ErrorKind,
 }
 
@@ -47,16 +48,17 @@ pub struct Error {
 enum ErrorKind {
     UnterminatedString,
     ExpectedIdentifier,
-    DuplicateType,
+    DuplicateType(String),
     DuplicateField,
     OverlappingRegister(String),
-    DuplicateFunction,
+    DuplicateFunction(String),
     ExpectedWord,
     ExpectedEndOfLine,
     ExpectedLine,
     TypeNotFound(String),
     RegisterNotFound(String),
     FunctionNotFound(String),
+    InvalidInstruction(String),
 }
 
 #[derive(Debug)]
@@ -117,77 +119,29 @@ struct PrefixMap<K, V> {
     map: BTreeMap<K, V>,
 }
 
+struct Lines<'a> {
+    lines: core::str::Lines<'a>,
+    line: usize,
+}
+
 pub const BUILTIN_WRITE_CONSTANT_STRING: u32 = 0;
 pub const BUILTIN_WRITE_CHARACTER: u32 = 1;
-pub const BUILTIN_WRITE_INTEGER32: u32 = 2;
-pub const BUILTIN_WRITE_NATURAL32: u32 = 3;
-pub const BUILTIN_WRITE_NEWLINE: u32 = 4;
 
 impl Collection {
-    pub fn add_default_builtins(&mut self) -> Result<(), Error> {
-        let mut f = |k: &str, v| {
-            self.types.try_insert(k.into(), Type::Builtin(v)).unwrap();
-        };
-        f("ConstantString", BuiltinType::ConstantString);
-        f("Integer32", BuiltinType::Integer32);
-        f("Natural32", BuiltinType::Natural32);
-
-        let mut f = |k: &str, v: &str| {
-            self.registers.try_insert(k.into(), v.into()).unwrap();
-        };
-        f("write_constant_string_value", "ConstantString");
-        f("write_character_value", "Natural32");
-        f("write_integer32_value", "Integer32");
-        f("write_natural32_value", "Natural32");
-
-        let mut f = |k: &str, id, registers: &[(_, &str)]| {
-            self.functions
-                .try_insert(
-                    k.into(),
-                    Function::Builtin {
-                        id,
-                        registers: registers
-                            .iter()
-                            .map(|(m, n)| (*m, n.to_string().into_boxed_str()))
-                            .collect(),
-                    },
-                )
-                .unwrap();
-        };
-        use Mode::*;
-        f(
-            "write_constant_string",
-            BUILTIN_WRITE_CONSTANT_STRING,
-            &[(In, "write_constant_string_value")],
-        );
-        f(
-            "write_character",
-            BUILTIN_WRITE_CHARACTER,
-            &[(In, "write_character_value")],
-        );
-        f(
-            "write_integer32",
-            BUILTIN_WRITE_INTEGER32,
-            &[(In, "write_integer32_value")],
-        );
-        f(
-            "write_natural32",
-            BUILTIN_WRITE_NATURAL32,
-            &[(In, "write_natural32_value")],
-        );
-        f("write_newline", BUILTIN_WRITE_NEWLINE, &[]);
-
-        Ok(())
-    }
-
     pub fn parse_text(&mut self, prefix: &str, text: &str) -> Result<(), Error> {
-        let mut lines = text.lines();
+        let mut lines = Lines {
+            lines: text.lines(),
+            line: 0,
+        };
         while let Some(line) = lines.next() {
             let line = trim_line(line);
             if line.is_empty() {
                 continue;
             }
-            let (word, line) = next_word(line).map_err(|kind| Error { kind })?;
+            let (word, line) = next_word(line).map_err(|kind| Error {
+                kind,
+                line: lines.line,
+            })?;
             match word {
                 "%" => self.line_parse_type(line),
                 "(" => self.line_parse_group(&mut lines, line),
@@ -197,9 +151,17 @@ impl Collection {
                 "@" => self.line_parse_register_array(line),
                 "[" => self.line_parse_switch(&mut lines, line),
                 ">" => self.line_parse_function(&mut lines, line),
-                tk => todo!("{tk}"),
+                tk => {
+                    return Err(Error {
+                        line: lines.line,
+                        kind: ErrorKind::InvalidInstruction(tk.into()),
+                    })
+                }
             }
-            .map_err(|kind| Error { kind })?;
+            .map_err(|kind| Error {
+                kind,
+                line: lines.line,
+            })?;
         }
         Ok(())
     }
@@ -214,7 +176,7 @@ impl Collection {
         let ty = Type::Enum(variants.into());
         self.types
             .try_insert(name.into(), ty)
-            .map_err(|_| ErrorKind::DuplicateType)
+            .map_err(|_| ErrorKind::DuplicateType(name.into()))
             .map(|_| ())
     }
 
@@ -248,7 +210,7 @@ impl Collection {
         self.types
             .try_insert(name.into(), Type::Group(fields.into()))
             .map(|_| ())
-            .map_err(|_| todo!())
+            .map_err(|_| ErrorKind::DuplicateType(name.into()))
     }
 
     fn line_parse_constant(&mut self, lines: &mut Lines<'_>, line: &str) -> Result<(), ErrorKind> {
@@ -291,6 +253,7 @@ impl Collection {
     fn line_parse_register(&mut self, line: &str) -> Result<(), ErrorKind> {
         let (name, line) = next_word(line)?;
         let (value, line) = next_word(line)?;
+        dbg!(&self.registers, name);
         next_eol(line)?;
         self.registers
             .try_insert(name.into(), value.into())
@@ -344,15 +307,6 @@ impl Collection {
             }
         };
 
-        if default.is_some() {
-            let line = lines.next().ok_or(ErrorKind::ExpectedLine)?.trim_end();
-            let (word, line) = next_word(line)?;
-            if word != "]" {
-                todo!()
-            }
-            next_eol(line)?;
-        }
-
         let f = Switch {
             register: register.into(),
             branches: branches.into(),
@@ -362,7 +316,7 @@ impl Collection {
         self.switches
             .try_insert(name.into(), f)
             .map(|_| ())
-            .map_err(|_| todo!())
+            .map_err(|e| ErrorKind::DuplicateFunction(e.entry.key().clone().into()))
     }
 
     fn line_parse_function(&mut self, lines: &mut Lines<'_>, line: &str) -> Result<(), ErrorKind> {
@@ -443,7 +397,7 @@ impl Collection {
         self.functions
             .try_insert(name.into(), f)
             .map(|_| ())
-            .map_err(|_| todo!())
+            .map_err(|_| ErrorKind::DuplicateFunction(name.into()))
     }
 }
 
@@ -535,6 +489,15 @@ where
     }
 }
 
+impl<'a> Iterator for Lines<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.line += 1;
+        self.lines.next()
+    }
+}
+
 fn next_line<'a>(lines: &mut Lines<'a>) -> Result<&'a str, ErrorKind> {
     loop {
         let line = lines.next().ok_or(ErrorKind::ExpectedLine)?;
@@ -591,9 +554,10 @@ mod test {
     #[test]
     fn stuff() {
         let mut col = super::Collection::default();
-        col.add_default_builtins().unwrap();
+        super::sys::add_defaults(&mut col).unwrap();
+        col.parse_text("", include_str!("../std.pil")).unwrap();
         let s = include_str!("../examples/hello_world.pil");
-        //let s = include_str!("../examples/union.pil");
+        let s = include_str!("../examples/union.pil");
         //let s = include_str!("../examples/group.pil");
         //let s = include_str!("../examples/array.pil");
         col.parse_text("", s).unwrap();
@@ -606,6 +570,7 @@ mod test {
         dbg!(&vm);
         let mut exec = vm.create_state();
         loop {
+            use {super::executor::wordvm::Yield, super::sys::wordvm::External};
             match exec
                 .step(&vm)
                 .inspect_err(|_| {
@@ -613,35 +578,12 @@ mod test {
                 })
                 .unwrap()
             {
-                super::executor::wordvm::Yield::Preempt => {}
-                super::executor::wordvm::Yield::Finish => break,
-                super::executor::wordvm::Yield::Sys { id } => {
-                    let regs = vm.sys_registers(id);
-                    match id {
-                        super::BUILTIN_WRITE_CONSTANT_STRING => {
-                            let offt = exec.register(regs[0]).unwrap();
-                            let len = exec.register(regs[0] + 1).unwrap();
-                            let s = &vm.strings_buffer()[offt as usize..][..len as usize];
-                            let s = core::str::from_utf8(s).unwrap();
-                            dbg!(s);
-                        }
-                        super::BUILTIN_WRITE_CHARACTER => {
-                            let chr = exec.register(regs[0]).unwrap();
-                            let chr = char::from_u32(chr).unwrap();
-                            dbg!(chr);
-                        }
-                        super::BUILTIN_WRITE_INTEGER32 => {
-                            let n = exec.register(regs[0]).unwrap();
-                            dbg!(n as i32);
-                        }
-                        super::BUILTIN_WRITE_NATURAL32 => {
-                            let n = exec.register(regs[0]).unwrap();
-                            dbg!(n as u32);
-                        }
-                        super::BUILTIN_WRITE_NEWLINE => {
-                            dbg!("newline");
-                        }
-                        id => todo!("{id}"),
+                Yield::Preempt => {}
+                Yield::Finish => break,
+                Yield::Sys { id } => {
+                    match super::sys::wordvm::handle(&vm, &mut exec, id).unwrap() {
+                        Some(External::WriteByte(c)) => { dbg!(c as char); },
+                        None => {}
                     }
                 }
             }

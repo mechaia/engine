@@ -1,10 +1,12 @@
 use {
     crate::{
-        program::{Constant, Function, FunctionBlock, FunctionSwitch, Instruction, Register},
+        program::{Function, Instruction},
         Map, Program,
     },
     core::fmt,
 };
+
+pub mod sys {}
 
 pub struct WordVM {
     instructions: Box<[u32]>,
@@ -94,10 +96,12 @@ impl WordVM {
             .iter()
             .map(|v| {
                 v.iter()
-                    .map(|i| if *i == u32::MAX {
-                        u32::MAX
-                    } else {
-                        register_offsets[usize::try_from(*i).unwrap()]
+                    .map(|i| {
+                        if *i == u32::MAX {
+                            u32::MAX
+                        } else {
+                            register_offsets[usize::try_from(*i).unwrap()]
+                        }
                     })
                     .collect()
             })
@@ -204,7 +208,7 @@ impl WordVM {
         }
 
         let (instructions, strings_offset) = encoder.finish(&program.strings_buffer);
-        let stack_size = program.max_call_depth(0);
+        let stack_size = program.max_call_depth();
 
         Self {
             instructions,
@@ -265,7 +269,7 @@ impl fmt::Debug for WordVM {
                 OP4_SET => {
                     let to = op >> 4;
                     match next_u32() {
-                        Some(value) => write!(f, "SET     {to} {value}")?,
+                        Some(value) => write!(f, "SET     {to} {}", value as i32)?,
                         _ => write!(f, "SET     {to} ???")?,
                     }
                 }
@@ -276,7 +280,7 @@ impl fmt::Debug for WordVM {
                 OP4_COND_EQ => {
                     let register = op >> 4;
                     if let Some(value) = next_u32() {
-                        write!(f, "C.EQ    {register} {value}")?
+                        write!(f, "C.EQ    {register} {}", value as i32)?
                     } else {
                         write!(f, "C.EQ    {register} ???")?
                     }

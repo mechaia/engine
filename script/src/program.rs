@@ -91,8 +91,7 @@ struct FunctionBuilder<'a, 'b> {
 
 #[derive(Debug)]
 enum Type<'a> {
-    Integer32,
-    Natural32,
+    Int(u8),
     ConstantString,
     Enum { value_to_id: Map<&'a Str, u32> },
     Group { fields: PrefixMap<&'a str, TypeId> },
@@ -159,27 +158,40 @@ impl Program {
         })
     }
 
-    pub fn max_call_depth(&self, entry: u32) -> u32 {
-        match &self.functions[entry as usize] {
+    pub fn max_call_depth(&self) -> u32 {
+        let mut visited = util::bit::BitVec::filled(self.functions.len(), false);
+        self._max_call_depth(0, &mut visited)
+    }
+
+    fn _max_call_depth(&self, entry: u32, visited: &mut util::bit::BitVec) -> u32 {
+        if visited.get(entry as usize).unwrap() {
+            // FIXME
+            return 0;
+        }
+        visited.set(entry as usize, true);
+        let n = match &self.functions[entry as usize] {
             Function::Block(f) => f
                 .instructions
                 .iter()
-                .map(|i| match i {
-                    &Instruction::Call { address } => 1 + self.max_call_depth(address),
-                    _ => 0,
+                .flat_map(|i| match i {
+                    &Instruction::Call { address } => Some((address, 1)),
+                    _ => None,
                 })
-                .chain(f.next.map(|a| self.max_call_depth(a)))
+                .chain(f.next.map(|a| (a, 0)))
+                .map(|(a, n)| n + self._max_call_depth(a, visited))
                 .max()
                 .unwrap_or(0),
             Function::Switch(s) => {
                 s.cases
                     .iter()
-                    .map(|c| self.max_call_depth(c.function))
+                    .map(|c| self._max_call_depth(c.function, visited))
                     .max()
                     .unwrap_or(0)
                     + 1
             }
-        }
+        };
+        visited.set(entry as usize, false);
+        n
     }
 }
 
@@ -226,8 +238,7 @@ impl<'a> ProgramBuilder<'a> {
                     let i = self.types_to_index[name];
                     self.builtin_types.try_insert(b, i).unwrap();
                     match b {
-                        BuiltinType::Integer32 => Type::Integer32,
-                        BuiltinType::Natural32 => Type::Natural32,
+                        BuiltinType::Int(bits) => Type::Int(bits),
                         BuiltinType::ConstantString => Type::ConstantString,
                     }
                 }
@@ -260,7 +271,7 @@ impl<'a> ProgramBuilder<'a> {
 
     fn collect_registers(&mut self, collection: &'a Collection) -> Result<(), Error> {
         for (name, ty) in collection.registers.iter() {
-            let ty = self.types_to_index[ty];
+            let ty = *self.types_to_index.get(ty).ok_or_else(|| todo!("{ty}"))?;
             let regmap = self.expand_register_group(ty)?;
             self.register_to_index
                 .try_insert(name, (regmap, ty))
@@ -439,7 +450,10 @@ impl<'a> ProgramBuilder<'a> {
                             }
                         })
                         .try_collect()?;
-                    self.sys_to_registers.try_insert(id, regs).unwrap();
+                    self.sys_to_registers.try_insert(id, regs).map_err(|e| {
+                        dbg!(e.entry.key());
+                        todo!();
+                    })?;
                     FunctionBlock {
                         instructions: [Instruction::Sys { id }].into(),
                         next: None,
@@ -452,10 +466,8 @@ impl<'a> ProgramBuilder<'a> {
         for (_name, switch) in collection.switches.iter() {
             let (register, ty) = self.register(&switch.register)?;
             match &self.types[ty.0 as usize] {
-                Type::Integer32 => todo!(),
-                Type::Natural32 => todo!(),
                 Type::ConstantString => todo!(),
-                Type::Enum { value_to_id } => {
+                Type::Int(_) | Type::Enum { .. } => {
                     let &RegisterMap::Unit { index: register } = register else {
                         todo!()
                     };
@@ -488,6 +500,7 @@ impl<'a> ProgramBuilder<'a> {
             .get(name)
             .ok_or_else(|| Error {
                 kind: ErrorKind::TypeNotFound(name.to_string()),
+                line: 0,
             })
             .copied()
     }
@@ -499,6 +512,7 @@ impl<'a> ProgramBuilder<'a> {
             .map(|((x, y), z)| (x, *y, z))
             .ok_or_else(|| Error {
                 kind: ErrorKind::RegisterNotFound(name.to_string()),
+                line: 0,
             })?;
 
         while post != "" {
@@ -523,6 +537,7 @@ impl<'a> ProgramBuilder<'a> {
             .map(|((x, y, z), w)| (x, *y, *z, w))
             .ok_or_else(|| Error {
                 kind: ErrorKind::RegisterNotFound(name.to_string()),
+                line: 0,
             })?;
 
         while post != "" {
@@ -545,6 +560,7 @@ impl<'a> ProgramBuilder<'a> {
             .get(name)
             .ok_or_else(|| Error {
                 kind: ErrorKind::FunctionNotFound(name.to_string()),
+                line: 0,
             })
             .copied()
     }
@@ -552,8 +568,11 @@ impl<'a> ProgramBuilder<'a> {
     fn get_or_add_const(&mut self, ty: TypeId, value: &'a Str) -> Result<u32, Error> {
         let value = {
             match &self.types[ty.0 as usize] {
-                Type::Integer32 => self.parse_integer32(value)?.to_ne_bytes().to_vec(),
-                Type::Natural32 => self.parse_natural32(value)?.to_ne_bytes().to_vec(),
+                Type::Int(32) => self.parse_integer32(value)?.to_ne_bytes().to_vec(),
+                Type::Int(8) => self.parse_integer8(value)?.to_ne_bytes().to_vec(),
+                Type::Int(1) => self.parse_integer8(value)?.to_ne_bytes().to_vec(),
+                Type::Int(2) => self.parse_integer8(value)?.to_ne_bytes().to_vec(),
+                Type::Int(bits) => todo!("{bits}"),
                 Type::ConstantString => {
                     let (offt, len) = self.parse_constant_string(value)?;
                     let mut b = [0; 8];
@@ -622,6 +641,10 @@ impl<'a> ProgramBuilder<'a> {
             .and_then(|n| Ok(n.try_into().unwrap()))
     }
 
+    fn parse_integer8(&mut self, value: &Str) -> Result<i8, Error> {
+        Ok(self.parse_integer32(value)?.try_into().unwrap())
+    }
+
     fn parse_integer32(&mut self, value: &Str) -> Result<i32, Error> {
         let (neg, s) = if value.starts_with("-") {
             (true, &value[1..])
@@ -641,7 +664,10 @@ impl<'a> ProgramBuilder<'a> {
         }
 
         let c = match it.next() {
-            Some('\\') => todo!(),
+            Some('\\') => match it.next() {
+                Some('n') => b'\n' as u32,
+                c => todo!("{:?}", c),
+            },
             Some('\'') => todo!(),
             Some(c) => c as u32,
             None => todo!(),
@@ -685,7 +711,8 @@ impl<'a> ProgramBuilder<'a> {
 
     fn type_index_dimensions(&self, ty: TypeId) -> Option<Vec<u32>> {
         match &self.types[ty.0 as usize] {
-            Type::Integer32 | Type::Natural32 | Type::ConstantString => None,
+            Type::Int(bits) => 1u32.checked_shl(u32::from(*bits)).map(|n| [n].into()),
+            Type::ConstantString => None,
             Type::Enum { value_to_id } => Some([u32::try_from(value_to_id.len()).unwrap()].into()),
             Type::Group { fields } => {
                 let mut dim = Vec::new();
@@ -860,7 +887,7 @@ impl<'a> Type<'a> {
     /// Minimum size in bits.
     pub fn bit_size(&self) -> u32 {
         match self {
-            Self::Integer32 | Self::Natural32 => 32,
+            Self::Int(bits) => (*bits).into(),
             // offset + length
             Self::ConstantString => 32 + 32,
             Self::Enum { value_to_id } => value_to_id

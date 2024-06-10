@@ -37,6 +37,7 @@ pub fn simple(program: &mut Program) {
         })
         .collect::<Vec<_>>();
 
+if 1 == 1 {
     for i in (0..program.functions.len()).rev() {
         let mut new_instrs = Vec::new();
 
@@ -46,15 +47,26 @@ pub fn simple(program: &mut Program) {
 
         for &instr in b.instructions.iter() {
             match instr {
-                Instruction::Call { address } if should_inline[address as usize] => {
-                    // TODO avoid inlining infinite loop function
+                Instruction::Call { mut address } => {
+                    // inline recursively to avoid inserting redundant calls
+                    loop {
+                        debug_assert_ne!(address as usize, i);
 
-                    let f_2 = &program.functions[address as usize];
-                    let Function::Block(b_2) = f_2 else { todo!() };
-                    new_instrs.extend_from_slice(&b_2.instructions);
+                        if !should_inline[address as usize] {
+                            new_instrs.push(Instruction::Call { address });
+                            break
+                        }
 
-                    if let Some(next_2) = b_2.next {
-                        new_instrs.push(Instruction::Call { address });
+                        let f_2 = &program.functions[address as usize];
+                        let Function::Block(b_2) = f_2 else { todo!() };
+
+                        new_instrs.extend_from_slice(&b_2.instructions);
+
+                        if let Some(next_2) = b_2.next {
+                            address = next_2
+                        } else {
+                            break
+                        }
                     }
                 }
                 instr => new_instrs.push(instr),
@@ -68,6 +80,7 @@ pub fn simple(program: &mut Program) {
     }
 
     sort_pre_order(program);
+}
 
     remove_unused_registers(program);
 }

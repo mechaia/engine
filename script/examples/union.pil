@@ -1,8 +1,8 @@
 % T A B C
 
 $ t T
-$ b Integer32
-$ c ConstantString
+$ b Int32
+$ c ConstStr
 
 > f
 | f_switch
