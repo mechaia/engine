@@ -481,7 +481,7 @@ mod test {
         let s = include_str!("../examples/hello_world.pil");
         let s = include_str!("../examples/union.pil");
         let s = include_str!("../examples/group.pil");
-        //let s = include_str!("../examples/array.pil");
+        let s = include_str!("../examples/array.pil");
         col.parse_text("", s).unwrap();
         dbg!(&col);
         let mut prog = super::Program::from_collection(&col, &"start".to_string().into()).unwrap();

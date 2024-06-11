@@ -1,33 +1,37 @@
 % I 0 1 2
 % J A B C D
 ( K
-& .i I
-& .j J
+& i I
+& j J
 )
 
-@ array_i I Natural32
-@ array_j J Natural32
-@ array_k K Natural32
+@ array_i I Int32
+@ array_j J Int32
+@ array_k K Int32
 
 $ i I
 $ j J
 $ k K
-$ x Natural32
+$ x Int32
 
 
 > start
 
 + x 42
 + i 1
-{ i array_i x
-} i write_natural32_value array_i
-| write_natural32
+{ array_i i x
+} array_i i int32:0
+| write.nat32
+| write.newline
 
 + x 1337
-+ k.i 2
-+ k.j C
-{ k array_k x
-} k write_natural32_value array_k
-| write_natural32
++ i 2
++ j C
+( k i i
+( k j j
+{ array_k k x
+} array_k k int32:0
+| write.nat32
+| write.newline
 
 <
