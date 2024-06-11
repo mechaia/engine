@@ -75,6 +75,15 @@ pub fn simple(program: &mut Program) {
         let Function::Block(b) = &mut program.functions[i] else {
             unreachable!()
         };
+
+        if b.next.is_none() {
+            match new_instrs.pop() {
+                Some(Instruction::Call { address }) => b.next = Some(address),
+                Some(n) => new_instrs.push(n),
+                None => {}
+            }
+        }
+
         b.instructions = new_instrs.into();
     }
 
