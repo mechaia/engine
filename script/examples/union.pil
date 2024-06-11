@@ -6,7 +6,7 @@ $ c ConstStr
 
 > f
 | f_switch
-= write_newline
+= write.newline
 
 [ f_switch t
 ? A f_a
@@ -15,26 +15,26 @@ $ c ConstStr
 ]
 
 > f_a 
-+ write_character_value 'a'
-= write_character
++ int8:0 'a'
+= write.byte
 
 > f_b 
-+ write_character_value 'b'
-| write_character
++ int8:0 'b'
+| write.byte
 | f_arrow
-. write_integer32_value b
-= write_integer32
+. int32:0 b
+= write.int32
 
 > f_c
-+ write_character_value 'c'
-| write_character
++ int8:0 'c'
+| write.byte
 | f_arrow
-. write_constant_string_value c
-= write_constant_string
+. const_str:0 c
+= write.const_str
 
 > f_arrow
-+ write_constant_string_value " -> "
-= write_constant_string
++ const_str:0 " -> "
+= write.const_str
 
 > start
 + t A

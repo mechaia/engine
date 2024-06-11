@@ -5,7 +5,7 @@ const INT_X_TO_32: u32 = 1 << 5;
 
 const INT_32_SUB: u32 = 2 << 5 | 0;
 const INT_32_SIGN: u32 = 2 << 5 | 1;
-const INT_32_DIVMOD: u32 = 2 << 5 | 2;
+const NAT_32_DIVMOD: u32 = 2 << 5 | 2;
 
 const CONST_STR_GET: u32 = 2 << 5 | 8;
 const CONST_STR_LEN: u32 = 2 << 5 | 9;
@@ -64,7 +64,7 @@ fn add_integer(c: &mut Collection) -> Result<(), Error> {
     add_fn(
         c,
         "int32.divmod",
-        INT_32_DIVMOD,
+        NAT_32_DIVMOD,
         [(InOut, "int32:0"), (InOut, "int32:1")],
     )?;
 
@@ -176,8 +176,21 @@ pub mod wordvm {
             INT_32_SIGN => {
                 state.set_register(f(1)?, (r(0)? as i32).signum() as u32)?
             }
+            NAT_32_DIVMOD => {
+                let x = r(0)?;
+                let y = r(1)?;
+                state.set_register(f(0)?, x / y)?;
+                state.set_register(f(1)?, x % y)?;
+            }
             WRITE_BYTE => {
                 return Ok(Some(External::WriteByte(r(0)? as u8)))
+            }
+            id if id >> 5 == 0 => {
+                let mask = 1u32.checked_shl(id & 0x1f).unwrap_or(0).wrapping_sub(1);
+                state.set_register(f(1)?, r(0)? & mask)?
+            }
+            id if id >> 5 == 1 => {
+                state.set_register(f(1)?, r(0)?)?
             }
             id => todo!("{id}"),
             _ => Err(Error)?,

@@ -1,5 +1,5 @@
 use {
-    crate::{BuiltinType, Collection, Error, ErrorKind, Map, PrefixMap, Str},
+    crate::{BuiltinType, Collection, Error, ErrorKind, Map, Str},
     core::fmt,
     std::rc::Rc,
 };
@@ -33,7 +33,7 @@ pub struct ArrayRegister {
 #[derive(Clone, Debug)]
 enum RegisterMap<'a> {
     Unit { index: u32 },
-    Group { fields: PrefixMap<&'a str, Self> },
+    Group { fields: Map<&'a Str, Self> },
 }
 
 #[derive(Debug)]
@@ -65,18 +65,14 @@ pub(crate) struct SwitchCase {
 struct ProgramBuilder<'a> {
     types_to_index: Map<&'a Str, TypeId>,
     types: Vec<Type<'a>>,
-    /// type -> name -> values
-    ///
-    /// Group uses a PrefixMap, which is ordered.
-    /// Box<[Str]> is hence also ordered
-    group_constants: Vec<Map<&'a Str, Box<[&'a Str]>>>,
+    group_constants: Vec<Option<&'a Map<Str, Map<Str, Str>>>>,
     function_to_index: Map<&'a Str, u32>,
     functions: Vec<Function>,
     constant_to_index: Map<Box<[u8]>, u32>,
     constants: Vec<Constant>,
-    register_to_index: PrefixMap<&'a str, (RegisterMap<'a>, TypeId)>,
+    register_to_index: Map<&'a Str, (RegisterMap<'a>, TypeId)>,
     registers: Vec<Register>,
-    array_register_to_index: PrefixMap<&'a str, (RegisterMap<'a>, TypeId, TypeId)>,
+    array_register_to_index: Map<&'a Str, (RegisterMap<'a>, TypeId, TypeId)>,
     array_registers: Vec<ArrayRegister>,
     builtin_types: Map<BuiltinType, TypeId>,
     strings_buffer: Vec<u8>,
@@ -94,7 +90,7 @@ enum Type<'a> {
     Int(u8),
     ConstantString,
     Enum { value_to_id: Map<&'a Str, u32> },
-    Group { fields: PrefixMap<&'a str, TypeId> },
+    Group { fields: Map<&'a Str, TypeId> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -131,7 +127,7 @@ impl Program {
         let stub_entry = "".to_string().into_boxed_str();
 
         builder.collect_types(collection)?;
-        builder.collect_group_constants(collection)?;
+        builder.collect_constants(collection)?;
         builder.collect_registers(collection)?;
         builder.collect_array_registers(collection)?;
         builder.collect_functions(collection, entry, &stub_entry)?;
@@ -230,7 +226,7 @@ impl<'a> ProgramBuilder<'a> {
                 crate::Type::Group(fields) => {
                     let fields = fields
                         .iter()
-                        .map(|(name, ty)| (&**name, self.types_to_index[ty]))
+                        .map(|(name, ty)| (name, self.types_to_index[ty]))
                         .collect();
                     Type::Group { fields }
                 }
@@ -248,24 +244,12 @@ impl<'a> ProgramBuilder<'a> {
         Ok(())
     }
 
-    fn collect_group_constants(&mut self, collection: &'a Collection) -> Result<(), Error> {
-        self.group_constants
-            .resize_with(self.types.len(), Default::default);
-
-        for (ty, constants) in collection.constants.iter() {
-            for (name, values) in constants.iter() {
-                let ty = self.types_to_index[ty];
-                let Type::Group { fields } = &self.types[ty.0 as usize] else {
-                    todo!();
-                };
-                assert_eq!(fields.len(), values.len());
-                let values = fields.iter().map(|(k, _)| &values[*k]).collect();
-                self.group_constants[ty.0 as usize]
-                    .try_insert(name, values)
-                    .unwrap();
-            }
+    fn collect_constants(&mut self, collection: &'a Collection) -> Result<(), Error> {
+        self.group_constants.resize(self.types.len(), None);
+        for (ty, consts) in collection.constants.iter() {
+            let ty = self.types_to_index[ty];
+            self.group_constants[ty.0 as usize] = Some(consts);
         }
-
         Ok(())
     }
 
@@ -291,7 +275,7 @@ impl<'a> ProgramBuilder<'a> {
                     let mut it = fields.iter().map(|(a, b)| (*a, *b));
                     if let Some((name, ty_f)) = it.next() {
                         ty = ty_f;
-                        stack.push((PrefixMap::default(), it, name));
+                        stack.push((Map::default(), it, name));
                     }
                     continue 'l;
                 }
@@ -349,7 +333,7 @@ impl<'a> ProgramBuilder<'a> {
                     let mut it = fields.iter().map(|(a, b)| (*a, *b));
                     if let Some((name, ty_f)) = it.next() {
                         ty = ty_f;
-                        stack.push((PrefixMap::default(), it, name));
+                        stack.push((Map::default(), it, name));
                     }
                     continue 'l;
                 }
@@ -506,53 +490,23 @@ impl<'a> ProgramBuilder<'a> {
     }
 
     fn register(&self, name: &'a Str) -> Result<(&RegisterMap<'a>, TypeId), Error> {
-        let (mut reg, mut ty, mut post) = self
-            .register_to_index
+        self.register_to_index
             .get(name)
-            .map(|((x, y), z)| (x, *y, z))
+            .map(|(x, y)| (x, *y))
             .ok_or_else(|| Error {
                 kind: ErrorKind::RegisterNotFound(name.to_string()),
                 line: 0,
-            })?;
-
-        while post != "" {
-            let RegisterMap::Group { fields } = reg else {
-                unreachable!()
-            };
-            let tyty = &self.types[usize::try_from(ty.0).unwrap()];
-            let Type::Group { fields: ty_fields } = tyty else {
-                unreachable!()
-            };
-            ty = *ty_fields.get(post).unwrap().0;
-            (reg, post) = fields.get(post).unwrap();
-        }
-
-        Ok((reg, ty))
+            })
     }
 
     fn array_register(&self, name: &'a Str) -> Result<(&RegisterMap<'a>, TypeId, TypeId), Error> {
-        let (mut reg, index_ty, mut value_ty, mut post) = self
-            .array_register_to_index
+        self.array_register_to_index
             .get(name)
-            .map(|((x, y, z), w)| (x, *y, *z, w))
+            .map(|(x, y, z)| (x, *y, *z))
             .ok_or_else(|| Error {
                 kind: ErrorKind::RegisterNotFound(name.to_string()),
                 line: 0,
-            })?;
-
-        while post != "" {
-            let RegisterMap::Group { fields } = reg else {
-                unreachable!()
-            };
-            let tyty = &self.types[usize::try_from(value_ty.0).unwrap()];
-            let Type::Group { fields: ty_fields } = tyty else {
-                unreachable!()
-            };
-            value_ty = *ty_fields.get(post).unwrap().0;
-            (reg, post) = fields.get(post).unwrap();
-        }
-
-        Ok((reg, index_ty, value_ty))
+            })
     }
 
     fn function(&self, name: &Str) -> Result<u32, Error> {
@@ -569,9 +523,7 @@ impl<'a> ProgramBuilder<'a> {
         let value = {
             match &self.types[ty.0 as usize] {
                 Type::Int(32) => self.parse_integer32(value)?.to_ne_bytes().to_vec(),
-                Type::Int(8) => self.parse_integer8(value)?.to_ne_bytes().to_vec(),
-                Type::Int(1) => self.parse_integer8(value)?.to_ne_bytes().to_vec(),
-                Type::Int(2) => self.parse_integer8(value)?.to_ne_bytes().to_vec(),
+                Type::Int(n) if *n <= 8 => self.parse_integer8(value)?.to_ne_bytes().to_vec(),
                 Type::Int(bits) => todo!("{bits}"),
                 Type::ConstantString => {
                     let (offt, len) = self.parse_constant_string(value)?;
@@ -745,7 +697,7 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
                 self.instructions.push(Instruction::Set { to, from });
             }
             RegisterMap::Group { fields } => {
-                let csts = &self.program.group_constants[ty.0 as usize];
+                let csts = &self.program.group_constants[ty.0 as usize].unwrap();
                 let csts = &csts[value];
                 assert_eq!(fields.len(), csts.len());
 
@@ -754,12 +706,12 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
                 };
 
                 //FIXME
-                let csts = csts.clone();
                 let ty_fields = ty_fields.clone();
 
-                for (((_, r), (_, tyty)), c) in fields.iter().zip(ty_fields.iter()).zip(csts.iter())
-                {
-                    self.set_recursive(r, *tyty, *c)?;
+                for (k, v) in csts.iter() {
+                    let f_reg = &fields[k];
+                    let f_ty = ty_fields[k];
+                    self.set_recursive(f_reg, f_ty, v)?;
                 }
             }
         }
@@ -799,6 +751,7 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         let (array, array_index_ty, array_ty) = self.program.array_register(array)?;
         let (register, register_ty) = self.program.register(register)?;
 
+        dbg!(index, array);
         assert_eq!(index_ty, array_index_ty);
         assert_eq!(array_ty, register_ty);
 
@@ -815,6 +768,8 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         let (array, array_index_ty, array_ty) = self.program.array_register(array)?;
         let (register, register_ty) = self.program.register(register)?;
 
+        dbg!(&self.program.types[index_ty.0 as usize]);
+        dbg!(&self.program.types[array_index_ty.0 as usize]);
         assert_eq!(index_ty, array_index_ty);
         assert_eq!(array_ty, register_ty);
 

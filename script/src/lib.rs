@@ -18,9 +18,9 @@ type Map<K, V> = std::collections::HashMap<K, V>;
 pub struct Collection {
     types: Map<Str, Type>,
     constants: Map<Str, Map<Str, Map<Str, Str>>>,
-    registers: PrefixMap<Str, Str>,
+    registers: Map<Str, Str>,
     /// (Index, Value)
-    array_registers: PrefixMap<Str, (Str, Str)>,
+    array_registers: Map<Str, (Str, Str)>,
     switches: Map<Str, Switch>,
     functions: Map<Str, Function>,
 }
@@ -112,11 +112,6 @@ enum Instruction {
     Call {
         function: Str,
     },
-}
-
-#[derive(Clone, Debug)]
-struct PrefixMap<K, V> {
-    map: BTreeMap<K, V>,
 }
 
 struct Lines<'a> {
@@ -401,94 +396,6 @@ impl Collection {
     }
 }
 
-impl<K, V> PrefixMap<K, V> {
-    fn len(&self) -> usize {
-        self.map.len()
-    }
-}
-
-impl<K, V> PrefixMap<K, V>
-where
-    K: Ord + Borrow<str>,
-{
-    fn get<'a>(&self, key: &'a str) -> Option<(&V, &'a str)> {
-        // https://users.rust-lang.org/t/is-it-possible-to-range-str-str-on-a-btreeset-string/93546/9
-        // utter garbage
-        use core::ops::Bound::*;
-        let range = (Unbounded, Included(key));
-        let (k, v) = self.map.range::<str, _>(range).next_back()?;
-        let k = k.borrow();
-        if key.len() < k.len() {
-            return None;
-        }
-        let (pre, post) = key.split_at(k.len());
-        if pre != k {
-            return None;
-        }
-        Some((v, post))
-    }
-
-    fn contains(&self, key: &str) -> bool {
-        // A ... AA ... [AB] ... ABC ... AC
-        //
-        // ^-------------^ conflict (1)
-        //
-        //               ^-------^ conflict (2)
-
-        // TODO we'll probably need a custom datastructure to handle (1) efficiently
-
-        // (1)
-        for i in key.char_indices().map(|x| x.0).chain([key.len()]) {
-            if self.map.contains_key(&key[..i]) {
-                return true;
-            }
-        }
-
-        // (2)
-        use core::ops::Bound::*;
-        let range = (Included(key), Unbounded);
-        let Some(x) = self.map.range::<str, _>(range).next() else {
-            return false;
-        };
-        x.0.borrow().starts_with(key)
-    }
-
-    fn try_insert(&mut self, key: K, value: V) -> Result<(), ()> {
-        if self.contains(key.borrow()) {
-            return Err(());
-        }
-        self.map
-            .try_insert(key, value)
-            .unwrap_or_else(|_| unreachable!());
-        Ok(())
-    }
-
-    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.map.iter()
-    }
-}
-
-impl<K, V> Default for PrefixMap<K, V> {
-    fn default() -> Self {
-        Self {
-            map: Default::default(),
-        }
-    }
-}
-
-impl<K, V> FromIterator<(K, V)> for PrefixMap<K, V>
-where
-    K: Ord + Borrow<str>,
-{
-    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
-        let mut s = Self::default();
-        for (k, v) in iter {
-            s.try_insert(k, v).unwrap();
-        }
-        s
-    }
-}
-
 impl<'a> Iterator for Lines<'a> {
     type Item = &'a str;
 
@@ -589,26 +496,5 @@ mod test {
             }
         }
         todo!();
-    }
-
-    #[test]
-    fn prefix_map() {
-        let mut map = super::PrefixMap::<&str, u32>::default();
-
-        map.try_insert("a.b", 42).unwrap();
-        map.try_insert("a.b", 42).unwrap_err();
-        map.try_insert("a.b.a", 42).unwrap_err();
-        map.try_insert("a.b.c", 42).unwrap_err();
-
-        let (v, post) = map.get("a.b.x").unwrap();
-        assert_eq!(*v, 42);
-        assert_eq!(post, ".x");
-
-        let (v, post) = map.get("a.b.a").unwrap();
-        assert_eq!(*v, 42);
-        assert_eq!(post, ".a");
-
-        assert!(map.get("a.a").is_none());
-        assert!(map.get("a.c").is_none());
     }
 }
