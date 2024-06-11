@@ -1,69 +1,64 @@
-( Vector3
-& .x Integer32
-& .y Integer32
-& .z Integer32
+( Vec3
+& x Int32
+& y Int32
+& z Int32
 )
 
-( Matrix3
-& .a Vector3
-& .b Vector3
-& .c Vector3
+( Mat3
+& a Vec3
+& b Vec3
+& c Vec3
 )
 
-_ Vector3 0
-+ .x 0
-+ .y 0
-+ .z 0
+_ Vec3 0
++ x 0
++ y 0
++ z 0
 -
 
-_ Vector3 1
-+ .x 1
-+ .y 1
-+ .z 1
+_ Vec3 1
++ x 1
++ y 1
++ z 1
 -
 
-_ Vector3 X
-+ .x 1
-+ .y 0
-+ .z 0
+_ Vec3 X
++ x 1
++ y 0
++ z 0
 -
 
-_ Vector3 Y
-+ .x 0
-+ .y 1
-+ .z 0
+_ Vec3 Y
++ x 0
++ y 1
++ z 0
 -
 
-_ Vector3 Z
-+ .x 0
-+ .y 0
-+ .z 1
+_ Vec3 Z
++ x 0
++ y 0
++ z 1
 -
 
-## Overlapping with vector group is invalid
-#$ vector.x T
-#$ vector. T
-#$ vectorx T
-#$ vector T
-##
-
-$ vector Vector3
-$ matrix Matrix3
-
-## Overlapping with vector group is invalid
-#$ vector.x T
-#$ vector. T
-#$ vectorx T
-#$ vector T
-##
+$ vec Vec3
+$ mat Mat3
+$ t Int32
 
 > start
-+ vector.x 7
-+ vector.y 8
-+ vector.z 9
-+ matrix.a.x 1
-+ matrix.a.y 2
-+ matrix.a.z 3
-+ matrix.b 1
-. matrix.c vector
++ t 1
+( vec x t
++ t 2
+( vec y t
++ t 3
+( vec z t
+( mat a vec
++ t 4
+( vec x t
++ t 5
+( vec y t
++ t 6
+( vec z t
+( mat b vec
+) mat a vec
+( mat c vec
 <

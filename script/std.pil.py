@@ -141,7 +141,7 @@ def write_ops():
 ! write.nat32:loop
 
 > @write_stack.push
-{ @8:index @8 int8:0
+{ @8 @8:index int8:0
 . int5:0 @8:index
 | int5.inc
 . @8:index int5:0
@@ -153,7 +153,7 @@ def write_ops():
 . int5:0 @8:index
 | int5.dec
 . @8:index int5:0
-} @8:index int8:0 @8
+} @8 @8:index int8:0
 | write.byte
 = @write_stack:switch
 [ @write_stack:switch @8:index

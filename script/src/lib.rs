@@ -109,6 +109,16 @@ enum Instruction {
         array: Str,
         register: Str,
     },
+    FromGroup {
+        group: Str,
+        field: Str,
+        register: Str,
+    },
+    ToGroup {
+        group: Str,
+        field: Str,
+        register: Str,
+    },
     Call {
         function: Str,
     },
@@ -325,60 +335,56 @@ impl Collection {
             let (word, line) = next_word(line)?;
             match word {
                 "." => {
-                    let (to, line) = next_word(line)?;
-                    let (from, line) = next_word(line)?;
-                    next_eol(line)?;
-                    instructions.push(Instruction::Move {
-                        to: to.into(),
-                        from: from.into(),
-                    });
+                    let [to, from] = next_words_eol(line)?;
+                    instructions.push(Instruction::Move { to, from });
                 }
                 "+" => {
-                    let (to, line) = next_word(line)?;
-                    let (value, line) = next_word(line)?;
-                    next_eol(line)?;
-                    instructions.push(Instruction::Set {
-                        to: to.into(),
-                        value: value.into(),
-                    });
+                    let [to, value] = next_words_eol(line)?;
+                    instructions.push(Instruction::Set { to, value });
                 }
                 "{" => {
-                    let (index, line) = next_word(line)?;
-                    let (array, line) = next_word(line)?;
-                    let (register, line) = next_word(line)?;
-                    next_eol(line)?;
+                    let [array, index, register] = next_words_eol(line)?;
                     instructions.push(Instruction::ToArray {
-                        index: index.into(),
-                        array: array.into(),
-                        register: register.into(),
+                        index,
+                        array,
+                        register,
                     });
                 }
                 "}" => {
-                    let (index, line) = next_word(line)?;
-                    let (register, line) = next_word(line)?;
-                    let (array, line) = next_word(line)?;
-                    next_eol(line)?;
+                    let [array, index, register] = next_words_eol(line)?;
                     instructions.push(Instruction::FromArray {
-                        index: index.into(),
-                        array: array.into(),
-                        register: register.into(),
+                        index,
+                        array,
+                        register,
                     });
                 }
                 "|" => {
-                    let (function, line) = next_word(line)?;
-                    next_eol(line)?;
-                    instructions.push(Instruction::Call {
-                        function: function.into(),
-                    });
+                    let [function] = next_words_eol(line)?;
+                    instructions.push(Instruction::Call { function });
                 }
                 "<" => {
                     next_eol(line)?;
                     break None;
                 }
                 "=" => {
-                    let (next, line) = next_word(line)?;
-                    next_eol(line)?;
+                    let [next] = next_words_eol(line)?;
                     break Some(next);
+                }
+                "(" => {
+                    let [group, field, register] = next_words_eol(line)?;
+                    instructions.push(Instruction::ToGroup {
+                        group,
+                        field,
+                        register,
+                    });
+                }
+                ")" => {
+                    let [group, field, register] = next_words_eol(line)?;
+                    instructions.push(Instruction::FromGroup {
+                        group,
+                        field,
+                        register,
+                    });
                 }
                 tk => todo!("{tk}"),
             }
@@ -456,6 +462,15 @@ fn next_eol(s: &str) -> Result<(), ErrorKind> {
     Ok(())
 }
 
+fn next_words_eol<const N: usize>(mut s: &str) -> Result<[Str; N], ErrorKind> {
+    let mut array = [""; N];
+    for a in array.iter_mut() {
+        (*a, s) = next_word(s)?;
+    }
+    next_eol(s)?;
+    Ok(array.map(|s| s.into()))
+}
+
 #[cfg(test)]
 mod test {
     #[test]
@@ -465,7 +480,7 @@ mod test {
         col.parse_text("", include_str!("../std.pil")).unwrap();
         let s = include_str!("../examples/hello_world.pil");
         let s = include_str!("../examples/union.pil");
-        //let s = include_str!("../examples/group.pil");
+        let s = include_str!("../examples/group.pil");
         //let s = include_str!("../examples/array.pil");
         col.parse_text("", s).unwrap();
         dbg!(&col);
@@ -489,7 +504,9 @@ mod test {
                 Yield::Finish => break,
                 Yield::Sys { id } => {
                     match super::sys::wordvm::handle(&vm, &mut exec, id).unwrap() {
-                        Some(External::WriteByte(c)) => { dbg!(c as char); },
+                        Some(External::WriteByte(c)) => {
+                            dbg!(c as char);
+                        }
                         None => {}
                     }
                 }

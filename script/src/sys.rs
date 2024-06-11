@@ -60,7 +60,12 @@ fn add_integer(c: &mut Collection) -> Result<(), Error> {
         INT_32_SUB,
         [(InOut, "int32:0"), (InOut, "int32:1")],
     )?;
-    add_fn(c, "int32.sign", INT_32_SIGN, [(In, "int32:0"), (Out, "int2:0")])?;
+    add_fn(
+        c,
+        "int32.sign",
+        INT_32_SIGN,
+        [(In, "int32:0"), (Out, "int2:0")],
+    )?;
     add_fn(
         c,
         "int32.divmod",
@@ -144,13 +149,20 @@ fn _add_fn(
 }
 
 pub mod wordvm {
-    use {super::*, crate::executor::wordvm::{Error, WordVM, WordVMState}};
+    use {
+        super::*,
+        crate::executor::wordvm::{Error, WordVM, WordVMState},
+    };
 
     pub enum External {
         WriteByte(u8),
     }
 
-    pub fn handle(vm: &WordVM, state: &mut WordVMState, id: u32) -> Result<Option<External>, Error> {
+    pub fn handle(
+        vm: &WordVM,
+        state: &mut WordVMState,
+        id: u32,
+    ) -> Result<Option<External>, Error> {
         let regs = vm.sys_registers(id);
         let f = |i| regs.get(i).copied().ok_or(Error);
         let rr = |i, o| state.register(f(i)? + o);
@@ -170,28 +182,20 @@ pub mod wordvm {
                 let len = rr(0, 1)?;
                 state.set_register(f(1)?, len)?;
             }
-            INT_32_SUB => {
-                state.set_register(f(0)?, r(0)?.wrapping_sub(r(1)?))?
-            }
-            INT_32_SIGN => {
-                state.set_register(f(1)?, (r(0)? as i32).signum() as u32)?
-            }
+            INT_32_SUB => state.set_register(f(0)?, r(0)?.wrapping_sub(r(1)?))?,
+            INT_32_SIGN => state.set_register(f(1)?, (r(0)? as i32).signum() as u32)?,
             NAT_32_DIVMOD => {
                 let x = r(0)?;
                 let y = r(1)?;
                 state.set_register(f(0)?, x / y)?;
                 state.set_register(f(1)?, x % y)?;
             }
-            WRITE_BYTE => {
-                return Ok(Some(External::WriteByte(r(0)? as u8)))
-            }
+            WRITE_BYTE => return Ok(Some(External::WriteByte(r(0)? as u8))),
             id if id >> 5 == 0 => {
                 let mask = 1u32.checked_shl(id & 0x1f).unwrap_or(0).wrapping_sub(1);
                 state.set_register(f(1)?, r(0)? & mask)?
             }
-            id if id >> 5 == 1 => {
-                state.set_register(f(1)?, r(0)?)?
-            }
+            id if id >> 5 == 1 => state.set_register(f(1)?, r(0)?)?,
             id => todo!("{id}"),
             _ => Err(Error)?,
         }

@@ -417,6 +417,16 @@ impl<'a> ProgramBuilder<'a> {
                                 register,
                             } => builder.from_array(index, array, register)?,
                             crate::Instruction::Call { function } => builder.call(function)?,
+                            crate::Instruction::ToGroup {
+                                group,
+                                field,
+                                register,
+                            } => builder.to_group(group, field, register)?,
+                            crate::Instruction::FromGroup {
+                                group,
+                                field,
+                                register,
+                            } => builder.from_group(group, field, register)?,
                         }
                     }
 
@@ -726,23 +736,31 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
             todo!()
         }
 
-        fn f(instructions: &mut Vec<Instruction>, to: &RegisterMap<'_>, from: &RegisterMap<'_>) {
-            use RegisterMap::*;
-            match (to, from) {
-                (&Unit { index: to }, &Unit { index: from }) => {
-                    instructions.push(Instruction::Move { to, from });
-                }
-                (Group { fields: to }, Group { fields: from }) => {
-                    for ((k1, to), (k2, from)) in to.iter().zip(from.iter()) {
-                        debug_assert_eq!(k1, k2);
-                        f(instructions, to, from);
-                    }
-                }
-                _ => todo!(),
-            }
-        }
+        Self::move_recursive(&mut self.instructions, to, from)
+    }
 
-        f(&mut self.instructions, to, from);
+    fn move_recursive(
+        instructions: &mut Vec<Instruction>,
+        to: &RegisterMap<'_>,
+        from: &RegisterMap<'_>,
+    ) -> Result<(), Error> {
+        use RegisterMap::*;
+        match (to, from) {
+            (&Unit { index: to }, &Unit { index: from }) => {
+                instructions.push(Instruction::Move { to, from });
+            }
+            (Group { fields: to }, Group { fields: from }) => {
+                if to.len() != from.len() {
+                    dbg!(to, from);
+                    todo!();
+                }
+                for (k, f_to) in to.iter() {
+                    let f_from = &from[k];
+                    Self::move_recursive(instructions, f_to, f_from)?;
+                }
+            }
+            _ => todo!(),
+        }
         Ok(())
     }
 
@@ -824,6 +842,47 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         let address = self.program.function(function)?;
         self.instructions.push(Instruction::Call { address });
         Ok(())
+    }
+
+    fn to_group(&mut self, group: &'a Str, field: &'a Str, register: &'a Str) -> Result<(), Error> {
+        self.group(true, group, field, register)
+    }
+
+    fn from_group(
+        &mut self,
+        group: &'a Str,
+        field: &'a Str,
+        register: &'a Str,
+    ) -> Result<(), Error> {
+        self.group(false, group, field, register)
+    }
+
+    fn group(
+        &mut self,
+        is_to: bool,
+        group: &'a Str,
+        field: &'a Str,
+        register: &'a Str,
+    ) -> Result<(), Error> {
+        dbg!(is_to, group, field, register);
+        let (group_reg, group_ty) = self.program.register(group)?;
+        let (reg, ty) = self.program.register(register)?;
+
+        let RegisterMap::Group { fields } = group_reg else {
+            todo!()
+        };
+        let field_reg = &fields[field];
+
+        // FIXME check type
+        let (to, from) = if is_to {
+            (field_reg, reg)
+        } else {
+            (reg, field_reg)
+        };
+
+        dbg!(to, from);
+
+        Self::move_recursive(&mut self.instructions, to, from)
     }
 
     fn finish(mut self, next: &'a Option<Str>) -> Result<FunctionBlock, Error> {
