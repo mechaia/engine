@@ -1,0 +1,25 @@
+> fp32.lt
+| fp32.sub
+| fp32.sign
+= @lt
+
+> fp32.eq
+| fp32.sub
+| fp32.sign
+= @eq
+
+> fp32.gt
+| fp32.sub
+| fp32.sign
+= @gt
+
+> fp32.neg
+. fp32:1 fp32:0
+= fp32.sub
+
+$ fp32:2 Fp32
+$ fp32:3 Fp32
+$ fp32:4 Fp32
+$ fp32:5 Fp32
+$ fp32:6 Fp32
+$ fp32:7 Fp32

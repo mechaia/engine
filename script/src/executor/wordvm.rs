@@ -1,4 +1,5 @@
 use {
+    super::Error,
     crate::{
         program::{Function, Instruction},
         Map, Program,
@@ -13,7 +14,7 @@ pub struct WordVM {
     registers_size: u32,
     stack_size: u32,
     strings_offset: u32,
-    sys_to_registers: Box<[Box<[u32]>]>,
+    sys_to_registers: Box<[(u32, u32)]>,
 }
 
 #[derive(Debug)]
@@ -32,9 +33,6 @@ pub enum Yield {
     Sys { id: u32 },
     Preempt,
 }
-
-#[derive(Clone, Debug)]
-pub struct Error;
 
 #[derive(Default)]
 struct OpEncoder {
@@ -90,22 +88,6 @@ impl WordVM {
             array_register_offsets.push(registers_size);
             registers_size += words_for_bits(reg.bits) * reg.dimensions.iter().product::<u32>();
         }
-
-        let sys_to_registers = program
-            .sys_to_registers
-            .iter()
-            .map(|v| {
-                v.iter()
-                    .map(|i| {
-                        if *i == u32::MAX {
-                            u32::MAX
-                        } else {
-                            register_offsets[usize::try_from(*i).unwrap()]
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
 
         let mut conv = |i, f: &Function| {
             encoder
@@ -207,11 +189,34 @@ impl WordVM {
             conv(i, f);
         }
 
-        let (instructions, strings_offset) = encoder.finish(&program.strings_buffer);
+        let (mut instructions, strings_offset) = encoder.finish(&program.strings_buffer);
         let stack_size = program.max_call_depth();
 
+        let sys_to_registers = program
+            .sys_to_registers
+            .iter()
+            .map(|map| {
+                if let Some(map) = map {
+                    let mut f = |s: &[u32]| {
+                        let start = u32::try_from(instructions.len()).unwrap();
+                        for &i in s.iter() {
+                            let i = usize::try_from(i).unwrap();
+                            let reg = &program.registers[i];
+                            for offt in 0..words_for_bits(reg.bits) {
+                                instructions.push(register_offsets[i] + offt);
+                            }
+                        }
+                        start
+                    };
+                    (f(&map.inputs), f(&map.outputs))
+                } else {
+                    (u32::MAX, u32::MAX)
+                }
+            })
+            .collect();
+
         Self {
-            instructions,
+            instructions: instructions.into(),
             registers_size,
             stack_size,
             strings_offset,
@@ -230,10 +235,18 @@ impl WordVM {
         }
     }
 
-    pub fn sys_registers(&self, id: u32) -> &[u32] {
+    pub(crate) fn sys_registers(&self, id: u32) -> (u32, u32) {
         self.sys_to_registers
             .get(usize::try_from(id).unwrap())
-            .map_or(&[], |v| &**v)
+            .copied()
+            .unwrap_or((u32::MAX, u32::MAX))
+    }
+
+    pub fn constant(&self, offset: u32) -> Result<u32, Error> {
+        self.instructions
+            .get(usize::try_from(offset).unwrap())
+            .copied()
+            .ok_or(Error)
     }
 
     pub fn strings_buffer(&self) -> &[u8] {
@@ -322,16 +335,39 @@ impl fmt::Debug for WordVM {
             f.write_str("\n")?;
         }
 
+        let strings_buffer_end = *self
+            .sys_to_registers
+            .iter()
+            .flat_map(|(x, y)| [x, y])
+            .min()
+            .unwrap();
+
         f.write_str("strings buffer: ")?;
-        for c in slice_u32_as_u8(&self.instructions[self.strings_offset as usize..]) {
+        for c in slice_u32_as_u8(
+            &self.instructions[self.strings_offset as usize..strings_buffer_end as usize],
+        ) {
             // FIXME bruh
             write!(f, "{}", *c as char)?;
         }
-        f.write_str("\n")?;
+        f.write_str("\n\n")?;
+
+        f.write_str("sys register indices:\n")?;
+        for (i, n) in self
+            .instructions
+            .iter()
+            .enumerate()
+            .skip(strings_buffer_end as usize)
+        {
+            // FIXME bruh
+            write!(f, "{i:>7}: {n}\n")?;
+        }
 
         f.write_str("sys register map:\n")?;
-        for (id, regs) in self.sys_to_registers.iter().enumerate() {
-            write!(f, "{id:>7}: {:?}\n", &regs)?;
+        for (id, &(input, output)) in self.sys_to_registers.iter().enumerate() {
+            if input == u32::MAX {
+                continue;
+            }
+            write!(f, "{id:>7}: {input}, {output}\n")?;
         }
 
         Ok(())
@@ -393,6 +429,8 @@ impl WordVMState {
             }
             OP4_RET => {
                 if self.stack_index == 0 {
+                    // set instruction index to invalid address as safeguard
+                    self.instruction_index = u32::MAX;
                     return Ok(Yield::Finish);
                 }
                 self.stack_index -= 1;
@@ -510,7 +548,7 @@ impl OpEncoder {
         self.instructions.push(OP4_ARRAY_STORE | (register << 4))
     }
 
-    fn finish(mut self, strings_buffer: &[u8]) -> (Box<[u32]>, u32) {
+    fn finish(mut self, strings_buffer: &[u8]) -> (Vec<u32>, u32) {
         for (&address, (resolve, label)) in self.resolve_label.iter() {
             let addr = self.label_to_address[label];
             match resolve {
@@ -529,7 +567,7 @@ impl OpEncoder {
         let strings_offset = self.cur();
         extend_u32_from_u8(&mut self.instructions, strings_buffer);
 
-        (self.instructions.into(), strings_offset)
+        (self.instructions, strings_offset)
     }
 }
 

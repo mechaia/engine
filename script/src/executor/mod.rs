@@ -1,106 +1,114 @@
+use crate::Program;
+
 pub mod wordvm;
 
-/*
-pub struct Executor<'a> {
-    pc: u32,
-    registers: Box<[u32]>,
-    call_stack: Vec<u32>,
-    program: &'a Program,
+#[derive(Debug)]
+pub enum Executable {
+    WordVM(wordvm::WordVM),
+}
+
+#[derive(Debug)]
+pub enum Instance {
+    WordVM(wordvm::WordVMState),
 }
 
 #[derive(Debug)]
 pub enum Yield {
     Finish,
-    Call { function: u32 },
-    Limit,
+    Sys { id: u32 },
 }
 
-impl<'a> Executor<'a> {
-    pub fn new(program: &'a Program, entry: Str) -> Result<Self, Error> {
-        let entry = program.entry_points.get(&entry).ok_or(Error)?;
-        todo!()
+#[derive(Clone, Debug)]
+pub struct Error;
+
+impl Executable {
+    pub fn from_program(program: &Program) -> Self {
+        Self::WordVM(wordvm::WordVM::from_program(program))
     }
 
-    pub fn run(&mut self, max_steps: Option<NonZeroU64>) -> Result<Yield, Error> {
-        for _ in 0..max_steps.unwrap_or(NonZeroU64::MAX).get() {
-            match self.next_u8()? {
-                OP_CALL => {
-                    let pc = self.next_i32()?;
-                    let next_pc = self.pc + 4;
-                    if let Ok(pc) = u32::try_from(pc) {
-                        self.pc = pc;
-                        *self.call_stack.get_mut(self.call_stack_index as usize).ok_or(Error)? = next_pc;
-                        self.call_stack_index += 1;
-                    } else {
-                        self.pc = next_pc;
-                        return Ok(Yield::Call { function: (!pc).try_into().unwrap() });
-                    }
-                },
-                OP_CALLTBL => {
-                    let count = self.next_u32()?;
-                    let next_pc = self.pc + count * 4;
-                    let pc = self.get_i32(self.pc + self.acc * 4)?;
-                    if let Ok(pc) = u32::try_from(pc) {
-                        self.pc = pc;
-                        *self.call_stack.get_mut(self.call_stack_index as usize).ok_or(Error)? = next_pc;
-                        self.call_stack_index += 1;
-                    } else {
-                        self.pc = next_pc;
-                        return Ok(Yield::Call { function: (!pc).try_into().unwrap() });
-                    }
+    pub fn new_instance(&self) -> Instance {
+        match self {
+            Self::WordVM(vm) => Instance::WordVM(vm.create_state()),
+        }
+    }
+
+    pub fn const_str<'str>(&'str self, ptr: u32, len: u32) -> Result<&'str [u8], Error> {
+        let ptr = usize::try_from(ptr).unwrap();
+        let len = usize::try_from(len).unwrap();
+        match self {
+            Self::WordVM(vm) => vm
+                .strings_buffer()
+                .get(ptr..)
+                .and_then(|s| s.get(..len))
+                .ok_or(Error),
+        }
+    }
+}
+
+impl Instance {
+    pub fn run(&mut self, executable: &Executable) -> Result<Yield, Error> {
+        match (self, executable) {
+            (Self::WordVM(state), Executable::WordVM(vm)) => loop {
+                match state.step(vm)? {
+                    wordvm::Yield::Finish => return Ok(Yield::Finish),
+                    wordvm::Yield::Sys { id } => return Ok(Yield::Sys { id }),
+                    wordvm::Yield::Preempt => {}
                 }
-                OP_RET => {
-                    self.call_stack_index -= 1;
-                    self.pc = *self.call_stack.get(self.call_stack_index as usize).ok_or(Error)?;
+            },
+        }
+    }
+
+    pub fn inputs_slice(
+        &self,
+        executable: &Executable,
+        sys: u32,
+        buf: &mut [u32],
+    ) -> Result<(), Error> {
+        match (self, executable) {
+            (Self::WordVM(state), Executable::WordVM(vm)) => {
+                let (mut input, _) = vm.sys_registers(sys);
+                if input == u32::MAX {
+                    return Err(Error);
                 }
-                OP_SET => {
-                    self.acc = self.next_u32()?;
+                for e in buf.iter_mut() {
+                    let reg = vm.constant(input)?;
+                    *e = state.register(reg)?;
+                    input += 1;
                 }
-                OP_STORE => {
-                    let addr = self.next_u32()? as usize;
-                    let v = self.data.get_mut(addr..addr + 4).ok_or(Error)?;
-                    v.copy_from_slice(&self.acc.to_ne_bytes())
-                }
-                OP_LOAD => {
-                    let addr = self.next_u32()? as usize;
-                    let v = self.data.get(addr..addr + 4).ok_or(Error)?;
-                    self.acc = u32::from_ne_bytes(v.try_into().unwrap());
-                }
-                OP_ADD => {
-                    self.acc += self.next_u32()?;
-                }
-                _ => return Err(Error),
+                Ok(())
             }
         }
-        Ok(Yield::Limit)
     }
 
-    fn next_u8(&mut self) -> Result<u8, Error> {
-        let pc = self.pc as usize;
-        self.pc += 1;
-        self.program.instructions.get(pc).ok_or(Error).copied()
+    pub fn inputs<const N: usize>(
+        &self,
+        executable: &Executable,
+        sys: u32,
+    ) -> Result<[u32; N], Error> {
+        let mut buf = [0; N];
+        self.inputs_slice(executable, sys, &mut buf)?;
+        Ok(buf)
     }
 
-    fn next_u32(&mut self) -> Result<u32, Error> {
-        let pc = self.pc;
-        self.pc += 4;
-        self.get_u32(pc)
-    }
-
-    fn next_i32(&mut self) -> Result<i32, Error> {
-        self.next_u32().map(|v| v as _)
-    }
-
-    fn get_u32(&mut self, index: u32) -> Result<u32, Error> {
-        self.program
-            .instructions
-            .get(index as _..index as usize + 4)
-            .map(|s| u32::from_ne_bytes(s.try_into().unwrap()))
-            .ok_or(Error)
-    }
-
-    fn get_i32(&mut self, index: u32) -> Result<i32, Error> {
-        self.get_u32(index as _).map(|v| v as _)
+    pub fn outputs(
+        &mut self,
+        executable: &Executable,
+        sys: u32,
+        values: &[u32],
+    ) -> Result<(), Error> {
+        match (self, executable) {
+            (Self::WordVM(state), Executable::WordVM(vm)) => {
+                let (_, mut output) = vm.sys_registers(sys);
+                if output == u32::MAX {
+                    return Err(Error);
+                }
+                for e in values.iter() {
+                    let reg = vm.constant(output)?;
+                    state.set_register(reg, *e)?;
+                    output += 1;
+                }
+                Ok(())
+            }
+        }
     }
 }
-*/

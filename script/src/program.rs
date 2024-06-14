@@ -11,7 +11,7 @@ pub struct Program {
     pub(crate) array_registers: Box<[ArrayRegister]>,
     pub(crate) functions: Box<[Function]>,
     pub(crate) strings_buffer: Box<[u8]>,
-    pub(crate) sys_to_registers: Box<[Box<[u32]>]>,
+    pub(crate) sys_to_registers: Box<[Option<SysRegisterMap>]>,
 }
 
 #[derive(Debug)]
@@ -61,6 +61,12 @@ pub(crate) struct SwitchCase {
     pub function: u32,
 }
 
+#[derive(Debug)]
+pub(crate) struct SysRegisterMap {
+    pub inputs: Box<[u32]>,
+    pub outputs: Box<[u32]>,
+}
+
 #[derive(Debug, Default)]
 struct ProgramBuilder<'a> {
     types_to_index: Map<&'a Str, TypeId>,
@@ -74,9 +80,8 @@ struct ProgramBuilder<'a> {
     registers: Vec<Register>,
     array_register_to_index: Map<&'a Str, (RegisterMap<'a>, TypeId, TypeId)>,
     array_registers: Vec<ArrayRegister>,
-    builtin_types: Map<BuiltinType, TypeId>,
     strings_buffer: Vec<u8>,
-    sys_to_registers: Map<u32, Vec<u32>>,
+    sys_to_registers: Map<u32, SysRegisterMap>,
 }
 
 #[derive(Debug)]
@@ -88,7 +93,9 @@ struct FunctionBuilder<'a, 'b> {
 #[derive(Debug)]
 enum Type<'a> {
     Int(u8),
+    Fp32,
     ConstantString,
+    Opaque { bits: u8 },
     Enum { value_to_id: Map<&'a Str, u32> },
     Group { fields: Map<&'a Str, TypeId> },
 }
@@ -138,10 +145,10 @@ impl Program {
             .map(|&k| usize::try_from(k).unwrap())
             .max()
             .map_or(0, |x| x + 1);
-        let mut sys_to_registers = (0..len).map(|_| Box::default()).collect::<Box<[_]>>();
+        let mut sys_to_registers = (0..len).map(|_| None).collect::<Box<[_]>>();
 
         for (k, v) in builder.sys_to_registers {
-            sys_to_registers[usize::try_from(k).unwrap()] = v.into();
+            sys_to_registers[usize::try_from(k).unwrap()] = Some(v);
         }
 
         Ok(Self {
@@ -232,10 +239,11 @@ impl<'a> ProgramBuilder<'a> {
                 }
                 &crate::Type::Builtin(b) => {
                     let i = self.types_to_index[name];
-                    self.builtin_types.try_insert(b, i).unwrap();
                     match b {
                         BuiltinType::Int(bits) => Type::Int(bits),
+                        BuiltinType::Fp32 => Type::Fp32,
                         BuiltinType::ConstantString => Type::ConstantString,
+                        BuiltinType::Opaque { bits } => Type::Opaque { bits },
                     }
                 }
             };
@@ -432,19 +440,28 @@ impl<'a> ProgramBuilder<'a> {
 
                     builder.finish(next)?
                 }
-                crate::Function::Builtin { id, registers } => {
+                crate::Function::Builtin {
+                    id,
+                    inputs,
+                    outputs,
+                } => {
                     let id = *id;
-                    let regs = registers
-                        .iter()
-                        .map(|r| {
-                            let (reg, ty) = self.register(&r.1)?;
-                            match reg {
-                                RegisterMap::Unit { index } => Ok(*index),
-                                RegisterMap::Group { fields } => todo!(),
-                            }
-                        })
-                        .try_collect()?;
-                    self.sys_to_registers.try_insert(id, regs).map_err(|e| {
+                    let f = |s: &[Str]| {
+                        s.iter()
+                            .map(|r| {
+                                let (reg, ty) = self.register(r)?;
+                                match reg {
+                                    RegisterMap::Unit { index } => Ok(*index),
+                                    RegisterMap::Group { fields } => todo!(),
+                                }
+                            })
+                            .try_collect()
+                    };
+                    let map = SysRegisterMap {
+                        inputs: f(inputs)?,
+                        outputs: f(outputs)?,
+                    };
+                    self.sys_to_registers.try_insert(id, map).map_err(|e| {
                         dbg!(e.entry.key());
                         todo!();
                     })?;
@@ -482,6 +499,8 @@ impl<'a> ProgramBuilder<'a> {
                         default,
                     }));
                 }
+                Type::Fp32 => todo!(),
+                Type::Opaque { .. } => todo!(),
                 Type::Group { .. } => todo!(),
             }
         }
@@ -532,9 +551,13 @@ impl<'a> ProgramBuilder<'a> {
     fn get_or_add_const(&mut self, ty: TypeId, value: &'a Str) -> Result<u32, Error> {
         let value = {
             match &self.types[ty.0 as usize] {
-                Type::Int(32) => self.parse_integer32(value)?.to_ne_bytes().to_vec(),
+                Type::Int(32) | Type::Opaque { bits: 32 } => {
+                    self.parse_integer32(value)?.to_ne_bytes().to_vec()
+                }
                 Type::Int(n) if *n <= 8 => self.parse_integer8(value)?.to_ne_bytes().to_vec(),
-                Type::Int(bits) => todo!("{bits}"),
+                Type::Int(bits) => todo!("int {bits}"),
+                Type::Opaque { bits } => todo!("opaque {bits}"),
+                Type::Fp32 => self.parse_fp32(value)?.to_ne_bytes().to_vec(),
                 Type::ConstantString => {
                     let (offt, len) = self.parse_constant_string(value)?;
                     let mut b = [0; 8];
@@ -619,6 +642,11 @@ impl<'a> ProgramBuilder<'a> {
         Ok(n)
     }
 
+    fn parse_fp32(&mut self, value: &Str) -> Result<f32, Error> {
+        // FIXME
+        self.parse_integer32(value).map(|x| x as f32)
+    }
+
     fn parse_char(&mut self, value: &str) -> Result<u32, Error> {
         let mut it = value.chars();
         if it.next() != Some('\'') {
@@ -658,10 +686,11 @@ impl<'a> ProgramBuilder<'a> {
                 b'0'..=b'9' => b - b'0',
                 b'a'..=b'f' => b - b'a' + 10,
                 b'A'..=b'F' => b - b'A' + 10,
-                _ => todo!(),
+                c => todo!("{}", c as char),
             };
             let x = u128::from(x);
             if x >= base {
+                dbg!(x as u8 as char);
                 todo!();
             }
             n = n.checked_mul(base).ok_or_else(|| todo!())?;
@@ -674,7 +703,13 @@ impl<'a> ProgramBuilder<'a> {
     fn type_index_dimensions(&self, ty: TypeId) -> Option<Vec<u32>> {
         match &self.types[ty.0 as usize] {
             Type::Int(bits) => 1u32.checked_shl(u32::from(*bits)).map(|n| [n].into()),
+            Type::Fp32 => None,
             Type::ConstantString => None,
+            // Don't allow indexing on opaque since
+            // - the bit length may change at any time
+            // - opaque values may represent handles,
+            //   and the value referenced may change without the opaque handle itself changing
+            Type::Opaque { .. } => None,
             Type::Enum { value_to_id } => Some([u32::try_from(value_to_id.len()).unwrap()].into()),
             Type::Group { fields } => {
                 let mut dim = Vec::new();
@@ -769,7 +804,6 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         let (array, array_index_ty, array_ty) = self.program.array_register(array)?;
         let (register, register_ty) = self.program.register(register)?;
 
-        dbg!(index, array);
         assert_eq!(index_ty, array_index_ty);
         assert_eq!(array_ty, register_ty);
 
@@ -786,8 +820,6 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         let (array, array_index_ty, array_ty) = self.program.array_register(array)?;
         let (register, register_ty) = self.program.register(register)?;
 
-        dbg!(&self.program.types[index_ty.0 as usize]);
-        dbg!(&self.program.types[array_index_ty.0 as usize]);
         assert_eq!(index_ty, array_index_ty);
         assert_eq!(array_ty, register_ty);
 
@@ -864,7 +896,6 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         field: &'a Str,
         register: &'a Str,
     ) -> Result<(), Error> {
-        dbg!(is_to, group, field, register);
         let (group_reg, group_ty) = self.program.register(group)?;
         let (reg, ty) = self.program.register(register)?;
 
@@ -879,8 +910,6 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         } else {
             (reg, field_reg)
         };
-
-        dbg!(to, from);
 
         Self::move_recursive(&mut self.instructions, to, from)
     }
@@ -902,8 +931,10 @@ impl<'a> Type<'a> {
     pub fn bit_size(&self) -> u32 {
         match self {
             Self::Int(bits) => (*bits).into(),
+            Self::Fp32 => 32,
             // offset + length
             Self::ConstantString => 32 + 32,
+            Self::Opaque { bits } => (*bits).into(),
             Self::Enum { value_to_id } => value_to_id
                 .len()
                 .checked_next_power_of_two()
@@ -921,5 +952,18 @@ impl<'a> Type<'a> {
 impl Default for Function {
     fn default() -> Self {
         Self::Block(Default::default())
+    }
+}
+
+impl SysRegisterMap {
+    pub fn iter_all(&self) -> impl Iterator<Item = u32> + '_ {
+        [&self.inputs, &self.outputs]
+            .into_iter()
+            .flat_map(|s| s.iter().copied())
+    }
+    pub fn iter_all_mut(&mut self) -> impl Iterator<Item = &mut u32> + '_ {
+        [&mut self.inputs, &mut self.outputs]
+            .into_iter()
+            .flat_map(|s| s.iter_mut())
     }
 }

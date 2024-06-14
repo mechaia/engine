@@ -1,7 +1,7 @@
 #![feature(slice_split_once, map_try_insert, iterator_try_collect)]
 #![deny(unused_must_use, elided_lifetimes_in_paths)]
 
-use std::{borrow::Borrow, collections::BTreeMap, hash::Hash};
+use std::hash::Hash;
 
 mod executor;
 pub mod optimize;
@@ -9,6 +9,7 @@ mod program;
 pub mod sys;
 
 //pub use util::str::PoolBoxU8 as Str;
+pub use executor::{Executable, Instance, Yield};
 pub use program::Program;
 
 type Str = Box<str>;
@@ -35,7 +36,9 @@ pub(crate) enum Type {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum BuiltinType {
     Int(u8),
+    Fp32,
     ConstantString,
+    Opaque { bits: u8 },
 }
 
 #[derive(Debug)]
@@ -77,16 +80,11 @@ enum Function {
     },
     Builtin {
         id: u32,
-        /// Registers used by this builtin.
-        registers: Box<[(Mode, Str)]>,
+        /// Input registers
+        inputs: Box<[Str]>,
+        /// Output registers
+        outputs: Box<[Str]>,
     },
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Mode {
-    InOut,
-    In,
-    Out,
 }
 
 #[derive(Debug)]
@@ -133,7 +131,7 @@ pub const BUILTIN_WRITE_CONSTANT_STRING: u32 = 0;
 pub const BUILTIN_WRITE_CHARACTER: u32 = 1;
 
 impl Collection {
-    pub fn parse_text(&mut self, prefix: &str, text: &str) -> Result<(), Error> {
+    pub fn parse_text(&mut self, text: &str) -> Result<(), Error> {
         let mut lines = Lines {
             lines: text.lines(),
             line: 0,
@@ -151,7 +149,6 @@ impl Collection {
                 "%" => self.line_parse_type(line),
                 "(" => self.line_parse_group(&mut lines, line),
                 "_" => self.line_parse_constant(&mut lines, line),
-                "~" => self.line_parse_alias(line),
                 "$" => self.line_parse_register(line),
                 "@" => self.line_parse_register_array(line),
                 "[" => self.line_parse_switch(&mut lines, line),
@@ -171,6 +168,50 @@ impl Collection {
         Ok(())
     }
 
+    pub fn add_standard(&mut self) -> Result<(), Error> {
+        sys::add_defaults(self)?;
+        self.parse_text(include_str!("../std.pil"))
+    }
+
+    pub fn add_ieee754(&mut self) -> Result<(), Error> {
+        sys::add_ieee754(self)?;
+        self.parse_text(include_str!("../ieee754.pil"))
+    }
+
+    pub fn add_opaque(&mut self, name: &str, bits: u8) -> Result<(), Error> {
+        self.types
+            .try_insert(name.into(), Type::Builtin(BuiltinType::Opaque { bits }))
+            .map(|_| ())
+            .map_err(|e| Error::new(0, ErrorKind::DuplicateType(e.entry.key().to_string())))
+    }
+
+    pub fn add_register(&mut self, name: &str, ty: &str) -> Result<(), Error> {
+        self.registers
+            .try_insert(name.into(), ty.into())
+            .map(|_| ())
+            .map_err(|e| Error::new(0, ErrorKind::DuplicateType(e.entry.key().to_string())))
+    }
+
+    pub fn add_sys(
+        &mut self,
+        name: &str,
+        id: u32,
+        inputs: &[&str],
+        outputs: &[&str],
+    ) -> Result<(), Error> {
+        self.functions
+            .try_insert(
+                name.into(),
+                Function::Builtin {
+                    id,
+                    inputs: inputs.iter().map(|&s| s.into()).collect(),
+                    outputs: outputs.iter().map(|&s| s.into()).collect(),
+                },
+            )
+            .map(|_| ())
+            .map_err(|e| Error::new(0, ErrorKind::DuplicateFunction(e.entry.key().to_string())))
+    }
+
     fn line_parse_type(&mut self, line: &str) -> Result<(), ErrorKind> {
         let (name, mut line) = next_word(line)?;
         let mut variants = Vec::new();
@@ -186,8 +227,7 @@ impl Collection {
     }
 
     fn line_parse_group(&mut self, lines: &mut Lines<'_>, line: &str) -> Result<(), ErrorKind> {
-        let (name, line) = next_word(line)?;
-        next_eol(line)?;
+        let [name] = next_words_eol(line)?;
 
         let mut fields = Vec::<(Str, Str)>::new();
 
@@ -196,13 +236,11 @@ impl Collection {
             let (word, line) = next_word(line)?;
             match word {
                 "&" => {
-                    let (name, line) = next_word(line)?;
-                    let (ty, line) = next_word(line)?;
-                    if fields.iter().any(|(n, _)| &**n == name) {
+                    let [name, ty] = next_words_eol(line)?;
+                    if fields.iter().any(|(n, _)| n == &name) {
                         return Err(ErrorKind::DuplicateField);
                     }
-                    fields.push((name.into(), ty.into()));
-                    next_eol(line)?;
+                    fields.push((name, ty));
                 }
                 ")" => {
                     next_eol(line)?;
@@ -213,9 +251,9 @@ impl Collection {
         }
 
         self.types
-            .try_insert(name.into(), Type::Group(fields.into()))
+            .try_insert(name, Type::Group(fields.into()))
             .map(|_| ())
-            .map_err(|_| ErrorKind::DuplicateType(name.into()))
+            .map_err(|e| ErrorKind::DuplicateType(e.entry.key().to_string()))
     }
 
     fn line_parse_constant(&mut self, lines: &mut Lines<'_>, line: &str) -> Result<(), ErrorKind> {
@@ -251,36 +289,24 @@ impl Collection {
             .map_err(|_| todo!())
     }
 
-    fn line_parse_alias(&mut self, line: &str) -> Result<(), ErrorKind> {
-        todo!()
-    }
-
     fn line_parse_register(&mut self, line: &str) -> Result<(), ErrorKind> {
-        let (name, line) = next_word(line)?;
-        let (value, line) = next_word(line)?;
-        dbg!(&self.registers, name);
-        next_eol(line)?;
+        let [name, ty] = next_words_eol(line)?;
         self.registers
-            .try_insert(name.into(), value.into())
-            .map_err(|_| ErrorKind::OverlappingRegister(name.into()))
+            .try_insert(name, ty)
+            .map_err(|e| ErrorKind::OverlappingRegister(e.entry.key().to_string()))
             .map(|_| ())
     }
 
     fn line_parse_register_array(&mut self, line: &str) -> Result<(), ErrorKind> {
-        let (name, line) = next_word(line)?;
-        let (index, line) = next_word(line)?;
-        let (value, line) = next_word(line)?;
-        next_eol(line)?;
+        let [name, index, value] = next_words_eol(line)?;
         self.array_registers
-            .try_insert(name.into(), (index.into(), value.into()))
-            .map_err(|_| ErrorKind::OverlappingRegister(name.into()))
+            .try_insert(name, (index, value))
+            .map_err(|e| ErrorKind::OverlappingRegister(e.entry.key().to_string()))
             .map(|_| ())
     }
 
     fn line_parse_switch(&mut self, lines: &mut Lines<'_>, line: &str) -> Result<(), ErrorKind> {
-        let (name, line) = next_word(line)?;
-        let (register, line) = next_word(line)?;
-        next_eol(line)?;
+        let [name, register] = next_words_eol(line)?;
 
         // Use a plain list to
         // - have consistent compile output
@@ -402,6 +428,12 @@ impl Collection {
     }
 }
 
+impl Error {
+    fn new(line: usize, kind: ErrorKind) -> Self {
+        Self { line, kind }
+    }
+}
+
 impl<'a> Iterator for Lines<'a> {
     type Item = &'a str;
 
@@ -476,13 +508,12 @@ mod test {
     #[test]
     fn stuff() {
         let mut col = super::Collection::default();
-        super::sys::add_defaults(&mut col).unwrap();
-        col.parse_text("", include_str!("../std.pil")).unwrap();
+        col.add_standard().unwrap();
         let s = include_str!("../examples/hello_world.pil");
         let s = include_str!("../examples/union.pil");
         let s = include_str!("../examples/group.pil");
         let s = include_str!("../examples/array.pil");
-        col.parse_text("", s).unwrap();
+        col.parse_text(s).unwrap();
         dbg!(&col);
         let mut prog = super::Program::from_collection(&col, &"start".to_string().into()).unwrap();
         dbg!(&prog);

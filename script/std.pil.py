@@ -52,22 +52,13 @@ def int_op_neg32():
 = int32.sub
 """
 
-def int_op_cmp32(name, cond):
+def int_op_cmp32(name):
     yield f"""
 > int32.{name}
 | int32.sub
 | int32.sign
-= int32.{name}:switch
-[ int32.{name}:switch int2:0
-? {cond} @true
-! @false
+= @{name}
 """
-
-def int_op_lt32():
-    yield from int_op_cmp32('lt', '-1')
-
-def int_op_gt32():
-    yield from int_op_cmp32('gt', '1')
 
 def int_op_to(from_bits, to_bits):
     yield f"""
@@ -178,6 +169,18 @@ $ @8:index Int5
 > @false
 + int1:0 0
 <
+
+[ @lt int2:0
+? -1 @true
+! @false
+
+[ @eq int2:0
+? 0 @true
+! @false
+
+[ @gt int2:0
+? 1 @true
+! @false
 """
 
 def all_ops():
@@ -193,8 +196,8 @@ def all_ops():
     yield from int_op_neg32()
     yield from int_op_inc32()
     yield from int_op_dec32()
-    yield from int_op_lt32()
-    yield from int_op_gt32()
+    yield from int_op_cmp32('lt')
+    yield from int_op_cmp32('gt')
 
 if __name__ == '__main__':
     print(*all_ops(), sep='', end='')

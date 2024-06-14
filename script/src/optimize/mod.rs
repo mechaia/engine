@@ -40,55 +40,57 @@ pub fn simple(program: &mut Program) {
     for i in (0..program.functions.len()).rev() {
         let mut new_instrs = Vec::new();
 
-        let Function::Block(b) = &program.functions[i] else {
-            continue;
-        };
+        match &program.functions[i] {
+            Function::Block(b) => {
+                for &instr in b.instructions.iter() {
+                    match instr {
+                        Instruction::Call { mut address } => {
+                            // inline recursively to avoid inserting redundant calls
+                            loop {
+                                debug_assert_ne!(address as usize, i);
 
-        for &instr in b.instructions.iter() {
-            match instr {
-                Instruction::Call { mut address } => {
-                    // inline recursively to avoid inserting redundant calls
-                    loop {
-                        debug_assert_ne!(address as usize, i);
+                                if !should_inline[address as usize] {
+                                    new_instrs.push(Instruction::Call { address });
+                                    break;
+                                }
 
-                        if !should_inline[address as usize] {
-                            new_instrs.push(Instruction::Call { address });
-                            break;
+                                let f_2 = &program.functions[address as usize];
+                                let Function::Block(b_2) = f_2 else { todo!() };
+
+                                new_instrs.extend_from_slice(&b_2.instructions);
+
+                                if let Some(next_2) = b_2.next {
+                                    address = next_2
+                                } else {
+                                    break;
+                                }
+                            }
                         }
-
-                        let f_2 = &program.functions[address as usize];
-                        let Function::Block(b_2) = f_2 else { todo!() };
-
-                        new_instrs.extend_from_slice(&b_2.instructions);
-
-                        if let Some(next_2) = b_2.next {
-                            address = next_2
-                        } else {
-                            break;
-                        }
+                        instr => new_instrs.push(instr),
                     }
                 }
-                instr => new_instrs.push(instr),
+
+                let Function::Block(b) = &mut program.functions[i] else {
+                    unreachable!()
+                };
+
+                if b.next.is_none() {
+                    match new_instrs.pop() {
+                        Some(Instruction::Call { address }) => b.next = Some(address),
+                        Some(n) => new_instrs.push(n),
+                        None => {}
+                    }
+                }
+
+                b.instructions = new_instrs.into();
             }
+            Function::Switch(s) => {}
         }
-
-        let Function::Block(b) = &mut program.functions[i] else {
-            unreachable!()
-        };
-
-        if b.next.is_none() {
-            match new_instrs.pop() {
-                Some(Instruction::Call { address }) => b.next = Some(address),
-                Some(n) => new_instrs.push(n),
-                None => {}
-            }
-        }
-
-        b.instructions = new_instrs.into();
     }
 
     sort_pre_order(program);
 
+    remove_unused_sys(program);
     remove_unused_registers(program);
 }
 
@@ -185,6 +187,23 @@ fn visit_funcref_mut<F: FnMut(&mut u32)>(function: &mut Function, mut f: F) {
     }
 }
 
+/// Remove unused system calls
+fn remove_unused_sys(program: &mut Program) {
+    let mut referenced = BitVec::filled(program.sys_to_registers.len(), false);
+    for f in program.functions.iter() {
+        let Function::Block(b) = f else { continue };
+        for instr in b.instructions.iter() {
+            let Instruction::Sys { id } = instr else { continue };
+            referenced.set(usize::try_from(*id).unwrap(), true);
+        }
+    }
+    for (b, s) in referenced.iter().zip(program.sys_to_registers.iter_mut()) {
+        if !b {
+            *s = None;
+        }
+    }
+}
+
 /// Remove unused registers
 fn remove_unused_registers(program: &mut Program) {
     let mut referenced = BitVec::filled(program.registers.len(), false);
@@ -209,8 +228,11 @@ fn remove_unused_registers(program: &mut Program) {
                             referenced.set(*reg as usize, true)
                         }
                         &Instruction::Sys { id } => {
-                            for reg in program.sys_to_registers[id as usize].iter() {
-                                referenced.set(*reg as usize, true);
+                            for reg in program.sys_to_registers[id as usize]
+                                .iter()
+                                .flat_map(|m| m.iter_all())
+                            {
+                                referenced.set(reg as usize, true);
                             }
                         }
                         Instruction::Call { .. } => {}
@@ -285,8 +307,11 @@ fn remove_unused_registers(program: &mut Program) {
     }
 
     for sys in program.sys_to_registers.iter_mut() {
-        for reg in sys.iter_mut() {
+        let Some(m) = sys else { continue };
+        let mut it = m.iter_all_mut();
+        while let Some(reg) = it.next() {
             *reg = remap[*reg as usize];
+            assert_ne!(*reg, u32::MAX);
         }
     }
 }
