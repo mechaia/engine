@@ -424,6 +424,7 @@ fn elide_redundant_moves(program: &mut Program) {
         for &instr in b.instructions.iter().rev() {
             let mut test_set = |r| used.get(r as usize).unwrap() && !set.replace(r as usize, true);
             match instr {
+                Instruction::Move { to, from } if to == from => {}
                 Instruction::Set { to, .. } | Instruction::Move { to, .. } => {
                     if test_set(to) {
                         new_instrs.push(instr);
