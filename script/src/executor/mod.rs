@@ -22,6 +22,11 @@ pub enum Yield {
 pub struct Error;
 
 impl Executable {
+    /// The highest reserved system ID number.
+    ///
+    /// External implementers MUST not use IDs below this limit.
+    pub const RESERVED_MAX_ID: u32 = 255;
+
     pub fn from_program(program: &Program) -> Self {
         Self::WordVM(wordvm::WordVM::from_program(program))
     }
@@ -51,7 +56,16 @@ impl Instance {
             (Self::WordVM(state), Executable::WordVM(vm)) => loop {
                 match state.step(vm)? {
                     wordvm::Yield::Finish => return Ok(Yield::Finish),
-                    wordvm::Yield::Sys { id } => return Ok(Yield::Sys { id }),
+                    wordvm::Yield::Sys { id } => {
+                        if id <= Executable::RESERVED_MAX_ID {
+                            match crate::sys::wordvm::handle(vm, state, id)? {
+                                None => {}
+                                Some(_) => todo!(),
+                            }
+                        } else {
+                            return Ok(Yield::Sys { id });
+                        }
+                    }
                     wordvm::Yield::Preempt => {}
                 }
             },

@@ -26,6 +26,11 @@ $ @8:index Int5
 ? 1 @true
 ! @false
 
+[ @ge int2:0
+? 1 @true
+? 0 @true
+! @false
+
 > write.newline
 + int8:0 '\n'
 = write.byte
@@ -4437,7 +4442,17 @@ $ int31:1 Int31
 | int32.sign
 = @lt
 
+> int32.eq
+| int32.sub
+| int32.sign
+= @eq
+
 > int32.gt
 | int32.sub
 | int32.sign
 = @gt
+
+> int32.ge
+| int32.sub
+| int32.sign
+= @ge

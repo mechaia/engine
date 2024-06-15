@@ -181,6 +181,11 @@ $ @8:index Int5
 [ @gt int2:0
 ? 1 @true
 ! @false
+
+[ @ge int2:0
+? 1 @true
+? 0 @true
+! @false
 """
 
 def all_ops():
@@ -197,7 +202,9 @@ def all_ops():
     yield from int_op_inc32()
     yield from int_op_dec32()
     yield from int_op_cmp32('lt')
+    yield from int_op_cmp32('eq')
     yield from int_op_cmp32('gt')
+    yield from int_op_cmp32('ge')
 
 if __name__ == '__main__':
     print(*all_ops(), sep='', end='')
