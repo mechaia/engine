@@ -1,6 +1,6 @@
 use {
     crate::{
-        program::{Constant, Function, Instruction},
+        program::{Constant, Function, Instruction, SwitchCase},
         Map, Program,
     },
     core::mem,
@@ -84,7 +84,16 @@ pub fn simple(program: &mut Program) {
 
                 b.instructions = new_instrs.into();
             }
-            Function::Switch(s) => {}
+            Function::Switch(s) => {
+                let cases = s.cases.iter().map(|c| SwitchCase {
+                    constant: c.constant,
+                    function: flatten_jump(program, c.function),
+                }).collect();
+                let default = s.default.map(|a| flatten_jump(program, a));
+                let Function::Switch(s) = &mut program.functions[i] else { unreachable!() };
+                s.cases = cases;
+                s.default = default;
+            }
         }
     }
 
@@ -314,4 +323,18 @@ fn remove_unused_registers(program: &mut Program) {
             assert_ne!(*reg, u32::MAX);
         }
     }
+}
+
+/// Flatten chain of jumps
+/// e.g. `JUMP X -> JUMP Y -> JUMP Z` becomes `JUMP Z`
+fn flatten_jump(program: &Program, mut start: u32) -> u32 {
+    loop {
+        let Function::Block(b) = &program.functions[start as usize] else { break };
+        if !b.instructions.is_empty() {
+            break;
+        }
+        let Some(addr) = b.next else { break };
+        start = addr;
+    }
+    start
 }
