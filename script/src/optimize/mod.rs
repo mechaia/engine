@@ -85,12 +85,18 @@ pub fn simple(program: &mut Program) {
                 b.instructions = new_instrs.into();
             }
             Function::Switch(s) => {
-                let cases = s.cases.iter().map(|c| SwitchCase {
-                    constant: c.constant,
-                    function: flatten_jump(program, c.function),
-                }).collect();
+                let cases = s
+                    .cases
+                    .iter()
+                    .map(|c| SwitchCase {
+                        constant: c.constant,
+                        function: flatten_jump(program, c.function),
+                    })
+                    .collect();
                 let default = s.default.map(|a| flatten_jump(program, a));
-                let Function::Switch(s) = &mut program.functions[i] else { unreachable!() };
+                let Function::Switch(s) = &mut program.functions[i] else {
+                    unreachable!()
+                };
                 s.cases = cases;
                 s.default = default;
             }
@@ -98,6 +104,9 @@ pub fn simple(program: &mut Program) {
     }
 
     sort_pre_order(program);
+
+    break_move_chains(program);
+    elide_redundant_moves(program);
 
     remove_unused_sys(program);
     remove_unused_registers(program);
@@ -202,7 +211,9 @@ fn remove_unused_sys(program: &mut Program) {
     for f in program.functions.iter() {
         let Function::Block(b) = f else { continue };
         for instr in b.instructions.iter() {
-            let Instruction::Sys { id } = instr else { continue };
+            let Instruction::Sys { id } = instr else {
+                continue;
+            };
             referenced.set(usize::try_from(*id).unwrap(), true);
         }
     }
@@ -237,12 +248,10 @@ fn remove_unused_registers(program: &mut Program) {
                             referenced.set(*reg as usize, true)
                         }
                         &Instruction::Sys { id } => {
-                            for reg in program.sys_to_registers[id as usize]
+                            program.sys_to_registers[id as usize]
                                 .iter()
                                 .flat_map(|m| m.iter_all())
-                            {
-                                referenced.set(reg as usize, true);
-                            }
+                                .for_each(|r| referenced.set(r as usize, true));
                         }
                         Instruction::Call { .. } => {}
                     }
@@ -329,7 +338,9 @@ fn remove_unused_registers(program: &mut Program) {
 /// e.g. `JUMP X -> JUMP Y -> JUMP Z` becomes `JUMP Z`
 fn flatten_jump(program: &Program, mut start: u32) -> u32 {
     loop {
-        let Function::Block(b) = &program.functions[start as usize] else { break };
+        let Function::Block(b) = &program.functions[start as usize] else {
+            break;
+        };
         if !b.instructions.is_empty() {
             break;
         }
@@ -337,4 +348,143 @@ fn flatten_jump(program: &Program, mut start: u32) -> u32 {
         start = addr;
     }
     start
+}
+
+#[derive(Clone, Copy)]
+enum RegisterValue {
+    /// Value is unknown, could be anything.
+    Unknown,
+    /// Value is a constant.
+    Constant(u32),
+    /// Value mirrors a register.
+    Alias(u32),
+}
+
+/// Break chains of moves.
+///
+/// This allows removing redundant moves and sets in a later pass.
+fn break_move_chains(program: &mut Program) {
+    let mut values = (0..program.registers.len())
+        .map(|_| RegisterValue::Unknown)
+        .collect::<Box<_>>();
+    let clear = |v: &mut [_]| v.iter_mut().for_each(|v| *v = RegisterValue::Unknown);
+
+    for f in program.functions.iter_mut() {
+        let Function::Block(b) = f else { continue };
+        clear(&mut values);
+        for instr in b.instructions.iter_mut() {
+            *instr = match *instr {
+                instr @ Instruction::Set { to, from } => {
+                    values[to as usize] = RegisterValue::Constant(from);
+                    instr
+                }
+                instr @ Instruction::Move { to, from } => match values[from as usize] {
+                    RegisterValue::Unknown => {
+                        values[to as usize] = RegisterValue::Alias(from);
+                        instr
+                    }
+                    RegisterValue::Constant(from) => {
+                        values[to as usize] = RegisterValue::Constant(from);
+                        Instruction::Set { to, from }
+                    }
+                    RegisterValue::Alias(from) => {
+                        values[to as usize] = RegisterValue::Alias(from);
+                        Instruction::Move { to, from }
+                    }
+                },
+                instr @ Instruction::Call { .. } => {
+                    clear(&mut values);
+                    instr
+                }
+                instr @ Instruction::Sys { id } => {
+                    let sys = program.sys_to_registers[id as usize].as_ref().unwrap();
+                    for &i in sys.outputs.iter() {
+                        values[i as usize] = RegisterValue::Unknown;
+                    }
+                    instr
+                }
+                instr => instr,
+            }
+        }
+    }
+}
+
+/// Remove moves and sets with no observable effect.
+fn elide_redundant_moves(program: &mut Program) {
+    let mut set = BitVec::filled(program.registers.len(), false);
+    let used = find_read_registers(program);
+
+    for f in program.functions.iter_mut() {
+        let Function::Block(b) = f else { continue };
+        set.fill(false);
+        let mut new_instrs = Vec::new();
+        let mut keep_array_access = true;
+        for &instr in b.instructions.iter().rev() {
+            let mut test_set = |r| used.get(r as usize).unwrap() && !set.replace(r as usize, true);
+            match instr {
+                Instruction::Set { to, .. } | Instruction::Move { to, .. } => {
+                    if test_set(to) {
+                        new_instrs.push(instr);
+                    }
+                }
+                Instruction::ArrayLoad { register } => {
+                    keep_array_access = test_set(register);
+                    if keep_array_access {
+                        new_instrs.push(instr);
+                    }
+                }
+                Instruction::ArrayIndex { .. } | Instruction::ArrayAccess { .. } => {
+                    if keep_array_access {
+                        new_instrs.push(instr);
+                    }
+                }
+                Instruction::Call { .. } => {
+                    set.fill(false);
+                    new_instrs.push(instr);
+                }
+                Instruction::Sys { id } => {
+                    let map = program.sys_to_registers[id as usize].as_ref().unwrap();
+                    map.outputs.iter().for_each(|&r| set.set(r as usize, true));
+                    map.inputs.iter().for_each(|&r| set.set(r as usize, false));
+                    new_instrs.push(instr);
+                }
+                _ => new_instrs.push(instr),
+            }
+        }
+        new_instrs.reverse();
+        b.instructions = new_instrs.into();
+    }
+}
+
+/// Mark registers which are read from.
+///
+/// "write-only" registers are unmarked.
+fn find_read_registers(program: &Program) -> BitVec {
+    let mut set = BitVec::filled(program.registers.len(), false);
+
+    for f in program.functions.iter() {
+        match f {
+            Function::Block(b) => {
+                for &instr in b.instructions.iter() {
+                    match instr {
+                        Instruction::Move { from: r, .. }
+                        | Instruction::ArrayStore { register: r }
+                        | Instruction::ArrayIndex { index: r } => set.set(r as usize, true),
+                        Instruction::Sys { id } => program.sys_to_registers[id as usize]
+                            .as_ref()
+                            .unwrap()
+                            .inputs
+                            .iter()
+                            .for_each(|&r| set.set(r as usize, true)),
+                        _ => {}
+                    }
+                }
+            }
+            Function::Switch(s) => {
+                set.set(s.register as usize, true);
+            }
+        }
+    }
+
+    set
 }
