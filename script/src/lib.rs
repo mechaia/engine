@@ -1,7 +1,8 @@
 #![feature(slice_split_once, map_try_insert, iterator_try_collect)]
 #![deny(unused_must_use, elided_lifetimes_in_paths)]
 
-use std::hash::Hash;
+use core::fmt;
+use std::{hash::Hash, ops::Index};
 
 mod executor;
 pub mod optimize;
@@ -24,6 +25,12 @@ pub struct Collection {
     array_registers: Map<Str, (Str, Str)>,
     switches: Map<Str, Switch>,
     functions: Map<Str, Function>,
+}
+
+/// Key-value map with keys in insertion order.
+#[derive(Clone)]
+struct LinearMap<K, V> {
+    map: util::soa::Vec2<K, V>,
 }
 
 #[derive(Debug)]
@@ -440,6 +447,85 @@ impl<'a> Iterator for Lines<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         self.line += 1;
         self.lines.next()
+    }
+}
+
+impl<K, V> LinearMap<K, V> {
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> + '_ {
+        self.map.iter()
+    }
+
+    fn values(&self) -> impl Iterator<Item = &V> + '_ {
+        self.iter().map(|(_, v)| v)
+    }
+
+    fn len(&self) -> usize {
+        self.map.len()
+    }
+}
+
+impl<K, V> LinearMap<K, V>
+where
+    K: Eq,
+{
+    fn get(&self, key: &K) -> Option<&V> {
+        self.map.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+    }
+
+    fn contains(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+
+    fn try_insert(&mut self, key: K, value: V) -> Result<&mut V, ()> {
+        if self.contains(&key) {
+            return Err(())
+        }
+        self.map.push((key, value));
+        Ok(self.map.get_mut(self.map.len() - 1).unwrap().1)
+    }
+}
+
+impl<K, V> Index<&K> for LinearMap<K, V>
+where
+    K: Eq,
+{
+    type Output = V;
+
+    fn index(&self, index: &K) -> &Self::Output {
+        self.get(index).expect("item not found")
+    }
+}
+
+impl<K, V> Index<K> for LinearMap<K, V>
+where
+    K: Eq,
+{
+    type Output = V;
+
+    fn index(&self, index: K) -> &Self::Output {
+        &self[&index]
+    }
+}
+
+impl<K, V> Default for LinearMap<K, V> {
+    fn default() -> Self {
+        Self { map: Default::default() }
+    }
+}
+
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for LinearMap<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut f = f.debug_map();
+        for (k, v) in self.map.iter() {
+            f.entry(k, v);
+        }
+        f.finish()
+    }
+}
+
+impl<K, V> FromIterator<(K, V)> for LinearMap<K, V> {
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+        Self { map: iter.into_iter().collect() }
     }
 }
 

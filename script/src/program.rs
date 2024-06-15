@@ -1,5 +1,5 @@
 use {
-    crate::{BuiltinType, Collection, Error, ErrorKind, Map, Str},
+    crate::{BuiltinType, Collection, Error, ErrorKind, LinearMap, Map, Str},
     core::fmt,
     std::rc::Rc,
 };
@@ -33,7 +33,7 @@ pub struct ArrayRegister {
 #[derive(Clone, Debug)]
 enum RegisterMap<'a> {
     Unit { index: u32 },
-    Group { fields: Map<&'a Str, Self> },
+    Group { fields: LinearMap<&'a Str, Self> },
 }
 
 #[derive(Debug)]
@@ -97,7 +97,7 @@ enum Type<'a> {
     ConstantString,
     Opaque { bits: u8 },
     Enum { value_to_id: Map<&'a Str, u32> },
-    Group { fields: Map<&'a Str, TypeId> },
+    Group { fields: LinearMap<&'a Str, TypeId> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -283,7 +283,7 @@ impl<'a> ProgramBuilder<'a> {
                     let mut it = fields.iter().map(|(a, b)| (*a, *b));
                     if let Some((name, ty_f)) = it.next() {
                         ty = ty_f;
-                        stack.push((Map::default(), it, name));
+                        stack.push((LinearMap::default(), it, name));
                     }
                     continue 'l;
                 }
@@ -341,7 +341,7 @@ impl<'a> ProgramBuilder<'a> {
                     let mut it = fields.iter().map(|(a, b)| (*a, *b));
                     if let Some((name, ty_f)) = it.next() {
                         ty = ty_f;
-                        stack.push((Map::default(), it, name));
+                        stack.push((LinearMap::default(), it, name));
                     }
                     continue 'l;
                 }
@@ -447,15 +447,23 @@ impl<'a> ProgramBuilder<'a> {
                 } => {
                     let id = *id;
                     let f = |s: &[Str]| {
-                        s.iter()
-                            .map(|r| {
-                                let (reg, ty) = self.register(r)?;
-                                match reg {
-                                    RegisterMap::Unit { index } => Ok(*index),
-                                    RegisterMap::Group { fields } => todo!(),
+                        let mut v = Vec::new();
+                        fn rec(v: &mut Vec<u32>, r: &RegisterMap<'_>) -> Result<(), Error> {
+                            match r {
+                                RegisterMap::Unit { index } => v.push(*index),
+                                RegisterMap::Group { fields } => {
+                                    for rr in fields.values() {
+                                        rec(v, rr)?
+                                    }
                                 }
-                            })
-                            .try_collect()
+                            }
+                            Ok(())
+                        }
+                        for r in s.iter() {
+                            let (reg, _) = self.register(r)?;
+                            rec(&mut v, reg)?;
+                        }
+                        Ok(v.into())
                     };
                     let map = SysRegisterMap {
                         inputs: f(inputs)?,
