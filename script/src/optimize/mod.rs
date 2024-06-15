@@ -373,37 +373,39 @@ fn break_move_chains(program: &mut Program) {
         let Function::Block(b) = f else { continue };
         clear(&mut values);
         for instr in b.instructions.iter_mut() {
-            *instr = match *instr {
-                instr @ Instruction::Set { to, from } => {
+            match instr {
+                &mut Instruction::Set { to, from } => {
                     values[to as usize] = RegisterValue::Constant(from);
-                    instr
                 }
-                instr @ Instruction::Move { to, from } => match values[from as usize] {
+                &mut Instruction::Move { to, from } => match values[from as usize] {
                     RegisterValue::Unknown => {
                         values[to as usize] = RegisterValue::Alias(from);
-                        instr
                     }
                     RegisterValue::Constant(from) => {
                         values[to as usize] = RegisterValue::Constant(from);
-                        Instruction::Set { to, from }
+                        *instr = Instruction::Set { to, from }
                     }
                     RegisterValue::Alias(from) => {
                         values[to as usize] = RegisterValue::Alias(from);
-                        Instruction::Move { to, from }
+                        *instr = Instruction::Move { to, from }
                     }
                 },
-                instr @ Instruction::Call { .. } => {
-                    clear(&mut values);
-                    instr
+                Instruction::ArrayStore { register: r } | Instruction::ArrayIndex { index: r } => {
+                    match values[*r as usize] {
+                        RegisterValue::Unknown | RegisterValue::Constant(_) => {}
+                        RegisterValue::Alias(reg) => *r = reg,
+                    }
                 }
-                instr @ Instruction::Sys { id } => {
+                Instruction::Call { .. } => {
+                    clear(&mut values);
+                }
+                &mut Instruction::Sys { id } => {
                     let sys = program.sys_to_registers[id as usize].as_ref().unwrap();
                     for &i in sys.outputs.iter() {
                         values[i as usize] = RegisterValue::Unknown;
                     }
-                    instr
                 }
-                instr => instr,
+                _ => {}
             }
         }
     }
