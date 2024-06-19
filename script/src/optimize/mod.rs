@@ -413,6 +413,10 @@ fn break_move_chains(program: &mut Program) {
         register: u32,
     ) {
         values[register as usize] = RegisterValue::Unknown;
+        remove_aliases(values, reverse_alias, register);
+    }
+
+    fn remove_aliases(values: &mut [RegisterValue], reverse_alias: &mut [LinearSet<u32>], register: u32) {
         for reg in reverse_alias[register as usize].drain() {
             values[reg as usize] = RegisterValue::Unknown;
         }
@@ -426,23 +430,32 @@ fn break_move_chains(program: &mut Program) {
                 &mut Instruction::Set { to, from } => {
                     values[to as usize] = RegisterValue::Constant(from);
                 }
-                &mut Instruction::Move { to, from } => match values[from as usize] {
-                    RegisterValue::Unknown => {
-                        set_alias(&mut values, &mut reverse_alias, from, to);
-                    }
-                    RegisterValue::Constant(from) => {
-                        values[to as usize] = RegisterValue::Constant(from);
-                        *instr = Instruction::Set { to, from }
-                    }
-                    RegisterValue::Alias(from) => {
-                        set_alias(&mut values, &mut reverse_alias, from, to);
-                        *instr = Instruction::Move { to, from }
+                Instruction::Move { to, from } => {
+                    // remove aliases to this register
+                    set_unknown(&mut values, &mut reverse_alias, *to);
+                    // do NOT try to be clever and "short-circuit" aliases in values[...]!!
+                    // it will likely break with e.g. swizzles
+                    // we may also miss some optimizations if we try
+                    // instead, keep values[...] a chain and resolve iteratively
+                    match values[*from as usize] {
+                        RegisterValue::Unknown | RegisterValue::Alias(_) => {
+                            set_alias(&mut values, &mut reverse_alias, *from, *to);
+                            while let RegisterValue::Alias(fr) = values[*from as usize] {
+                                *from = fr;
+                            }
+                        }
+                        RegisterValue::Constant(cst) => {
+                            values[*to as usize] = RegisterValue::Constant(cst);
+                            *instr = Instruction::Set { to: *to, from: cst };
+                        }
                     }
                 },
                 Instruction::ArrayStore { register: r } | Instruction::ArrayIndex { index: r } => {
                     match values[*r as usize] {
                         RegisterValue::Unknown | RegisterValue::Constant(_) => {}
-                        RegisterValue::Alias(reg) => *r = reg,
+                        RegisterValue::Alias(reg) => {
+                            *r = reg;
+                        }
                     }
                 }
                 Instruction::Call { .. } => {
@@ -497,7 +510,13 @@ fn elide_redundant_moves(program: &mut Program) {
                         new_instrs.push(instr);
                     }
                 }
-                Instruction::ArrayIndex { .. } | Instruction::ArrayAccess { .. } => {
+                Instruction::ArrayIndex { index } => {
+                    if keep_array_access {
+                        new_instrs.push(instr);
+                    }
+                    set.set(index as usize, false);
+                }
+                Instruction::ArrayAccess { .. } => {
                     if keep_array_access {
                         new_instrs.push(instr);
                     }
@@ -510,13 +529,13 @@ fn elide_redundant_moves(program: &mut Program) {
                     let map = program.sys_to_registers[id as usize].as_ref().unwrap();
                     map.outputs.iter().for_each(|&r| set.set(r as usize, true));
                     map.inputs.iter().for_each(|&r| set.set(r as usize, false));
-                    //set.fill(false);
                     new_instrs.push(instr);
                 }
                 // TODO
                 Instruction::ArrayStore { register } => {
                     set.set(register as usize, false);
                     new_instrs.push(instr);
+                    keep_array_access = true;
                 }
             }
         }
