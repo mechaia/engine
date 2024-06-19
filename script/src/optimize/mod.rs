@@ -360,18 +360,64 @@ enum RegisterValue {
     Alias(u32),
 }
 
+#[derive(Clone, Debug, Default)]
+struct LinearSet<T> {
+    set: Vec<T>,
+}
+
+impl<T: Eq> LinearSet<T> {
+    fn insert(&mut self, value: T) {
+        if !self.set.contains(&value) {
+            self.set.push(value);
+        }
+    }
+
+    fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
+        self.set.drain(..)
+    }
+
+    fn clear(&mut self) {
+        self.set.clear();
+    }
+}
+
 /// Break chains of moves.
 ///
 /// This allows removing redundant moves and sets in a later pass.
 fn break_move_chains(program: &mut Program) {
-    let mut values = (0..program.registers.len())
-        .map(|_| RegisterValue::Unknown)
-        .collect::<Box<_>>();
-    let clear = |v: &mut [_]| v.iter_mut().for_each(|v| *v = RegisterValue::Unknown);
+    let it = || 0..program.registers.len();
+    let mut values = it().map(|_| RegisterValue::Unknown).collect::<Box<_>>();
+    let mut reverse_alias = it().map(|_| LinearSet::default()).collect::<Box<[_]>>();
+
+    fn clear(values: &mut [RegisterValue], reverse_alias: &mut [LinearSet<u32>]) {
+        values.iter_mut().for_each(|v| *v = RegisterValue::Unknown);
+        reverse_alias.iter_mut().for_each(|v| v.clear());
+    }
+
+    fn set_alias(
+        values: &mut [RegisterValue],
+        reverse_alias: &mut [LinearSet<u32>],
+        from: u32,
+        to: u32,
+    ) {
+        values[to as usize] = RegisterValue::Alias(from);
+        reverse_alias[from as usize].insert(to);
+    }
+
+    fn set_unknown(
+        values: &mut [RegisterValue],
+        reverse_alias: &mut [LinearSet<u32>],
+        register: u32,
+    ) {
+        values[register as usize] = RegisterValue::Unknown;
+        for reg in reverse_alias[register as usize].drain() {
+            values[reg as usize] = RegisterValue::Unknown;
+        }
+    }
 
     for f in program.functions.iter_mut() {
         let Function::Block(b) = f else { continue };
-        clear(&mut values);
+        clear(&mut values, &mut reverse_alias);
         for instr in b.instructions.iter_mut() {
             match instr {
                 &mut Instruction::Set { to, from } => {
@@ -379,14 +425,14 @@ fn break_move_chains(program: &mut Program) {
                 }
                 &mut Instruction::Move { to, from } => match values[from as usize] {
                     RegisterValue::Unknown => {
-                        values[to as usize] = RegisterValue::Alias(from);
+                        set_alias(&mut values, &mut reverse_alias, from, to);
                     }
                     RegisterValue::Constant(from) => {
                         values[to as usize] = RegisterValue::Constant(from);
                         *instr = Instruction::Set { to, from }
                     }
                     RegisterValue::Alias(from) => {
-                        values[to as usize] = RegisterValue::Alias(from);
+                        set_alias(&mut values, &mut reverse_alias, from, to);
                         *instr = Instruction::Move { to, from }
                     }
                 },
@@ -397,15 +443,18 @@ fn break_move_chains(program: &mut Program) {
                     }
                 }
                 Instruction::Call { .. } => {
-                    clear(&mut values);
+                    clear(&mut values, &mut reverse_alias);
                 }
                 &mut Instruction::Sys { id } => {
                     let sys = program.sys_to_registers[id as usize].as_ref().unwrap();
                     for &i in sys.outputs.iter() {
-                        values[i as usize] = RegisterValue::Unknown;
+                        set_unknown(&mut values, &mut reverse_alias, i)
                     }
                 }
-                _ => {}
+                Instruction::ArrayAccess { .. } => {}
+                Instruction::ArrayLoad { register } => {
+                    set_unknown(&mut values, &mut reverse_alias, *register)
+                }
             }
         }
     }
