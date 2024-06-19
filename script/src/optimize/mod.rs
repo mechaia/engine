@@ -474,10 +474,19 @@ fn elide_redundant_moves(program: &mut Program) {
             let mut test_set = |r| used.get(r as usize).unwrap() && !set.replace(r as usize, true);
             match instr {
                 Instruction::Move { to, from } if to == from => {}
-                Instruction::Set { to, .. } | Instruction::Move { to, .. } => {
+                Instruction::Set { to, .. } => {
                     if test_set(to) {
                         new_instrs.push(instr);
                     }
+                }
+                Instruction::Move { to, from } => {
+                    if test_set(to) {
+                        new_instrs.push(instr);
+                    }
+                    // set 'from' to false since we're using it
+                    // useless if we did a 'break_move_chains' pass before,
+                    // but keep it for sanity
+                    set.set(from as usize, false);
                 }
                 Instruction::ArrayLoad { register } => {
                     keep_array_access = test_set(register);
@@ -498,9 +507,14 @@ fn elide_redundant_moves(program: &mut Program) {
                     let map = program.sys_to_registers[id as usize].as_ref().unwrap();
                     map.outputs.iter().for_each(|&r| set.set(r as usize, true));
                     map.inputs.iter().for_each(|&r| set.set(r as usize, false));
+                    //set.fill(false);
                     new_instrs.push(instr);
                 }
-                _ => new_instrs.push(instr),
+                // TODO
+                Instruction::ArrayStore { register } => {
+                    set.set(register as usize, false);
+                    new_instrs.push(instr);
+                }
             }
         }
         new_instrs.reverse();
