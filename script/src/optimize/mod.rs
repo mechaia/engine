@@ -10,7 +10,18 @@ use {
 /// Very basic and fast optimizer.
 pub fn simple(program: &mut Program) {
     sort_pre_order(program);
+    inline(program);
+    sort_pre_order(program);
 
+    break_move_chains(program);
+    elide_redundant_moves(program);
+
+    remove_unused_sys(program);
+    remove_unused_registers(program);
+}
+
+/// Inline functions.
+fn inline(program: &mut Program) {
     let func_refcounts = count_function_references(program);
 
     // inline small functions and functions only referenced once by a direct call/jump
@@ -102,14 +113,6 @@ pub fn simple(program: &mut Program) {
             }
         }
     }
-
-    sort_pre_order(program);
-
-    break_move_chains(program);
-    elide_redundant_moves(program);
-
-    remove_unused_sys(program);
-    remove_unused_registers(program);
 }
 
 /// Determine per-function reference counts.
