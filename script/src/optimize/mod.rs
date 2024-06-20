@@ -1,7 +1,7 @@
 use {
     crate::{
-        program::{Constant, Function, Instruction, SwitchCase},
-        Map, Program,
+        program::{Function, Instruction, SwitchCase},
+        Program,
     },
     core::mem,
     util::bit::BitVec,
@@ -38,11 +38,22 @@ fn inline(program: &mut Program) {
             if b.instructions.is_empty() {
                 return true;
             }
-            if b.next.is_none() {
-                return matches!(
-                    &*b.instructions,
-                    [Instruction::Sys { .. }] | [Instruction::Call { .. }]
-                );
+            // Inline functions that are only moves or simple wrappers
+            // These functions are usually simple constructors like vec3_new, which just copy registers
+            let it = || b.instructions.iter();
+            if it()
+                .filter(|i| matches!(i, Instruction::Move { .. }))
+                .count()
+                >= b.instructions.len() - 1
+            {
+                let max = usize::from(b.next.is_none());
+                if it()
+                    .filter(|i| matches!(i, Instruction::Call { .. } | Instruction::Sys { .. }))
+                    .count()
+                    <= max
+                {
+                    return true;
+                }
             }
             false
         })
@@ -375,6 +386,15 @@ impl<T: Eq> LinearSet<T> {
         }
     }
 
+    fn remove(&mut self, value: &T) {
+        for (i, v) in self.set.iter().enumerate() {
+            if v == value {
+                self.set.swap_remove(i);
+                break;
+            }
+        }
+    }
+
     fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
         self.set.drain(..)
     }
@@ -416,7 +436,11 @@ fn break_move_chains(program: &mut Program) {
         remove_aliases(values, reverse_alias, register);
     }
 
-    fn remove_aliases(values: &mut [RegisterValue], reverse_alias: &mut [LinearSet<u32>], register: u32) {
+    fn remove_aliases(
+        values: &mut [RegisterValue],
+        reverse_alias: &mut [LinearSet<u32>],
+        register: u32,
+    ) {
         for reg in reverse_alias[register as usize].drain() {
             values[reg as usize] = RegisterValue::Unknown;
         }
@@ -449,7 +473,7 @@ fn break_move_chains(program: &mut Program) {
                             *instr = Instruction::Set { to: *to, from: cst };
                         }
                     }
-                },
+                }
                 Instruction::ArrayStore { register: r } | Instruction::ArrayIndex { index: r } => {
                     match values[*r as usize] {
                         RegisterValue::Unknown | RegisterValue::Constant(_) => {}

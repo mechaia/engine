@@ -10,13 +10,15 @@ pub struct Program {
     pub(crate) registers: Box<[Register]>,
     pub(crate) array_registers: Box<[ArrayRegister]>,
     pub(crate) functions: Box<[Function]>,
-    pub(crate) strings_buffer: Box<[u8]>,
     pub(crate) sys_to_registers: Box<[Option<SysRegisterMap>]>,
 }
 
-#[derive(Debug)]
-pub struct Constant {
-    pub value: Box<[u8]>,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Constant {
+    Int(u32),
+    Str(Box<[u8]>),
+    // as bits so we can match exactly with Eq
+    Fp(u32),
 }
 
 #[derive(Debug)]
@@ -74,13 +76,12 @@ struct ProgramBuilder<'a> {
     group_constants: Vec<Option<&'a Map<Str, Map<Str, Str>>>>,
     function_to_index: Map<&'a Str, u32>,
     functions: Vec<Function>,
-    constant_to_index: Map<Box<[u8]>, u32>,
+    constant_to_index: Map<Constant, u32>,
     constants: Vec<Constant>,
     register_to_index: Map<&'a Str, (RegisterMap<'a>, TypeId)>,
     registers: Vec<Register>,
     array_register_to_index: Map<&'a Str, (RegisterMap<'a>, TypeId, TypeId)>,
     array_registers: Vec<ArrayRegister>,
-    strings_buffer: Vec<u8>,
     sys_to_registers: Map<u32, SysRegisterMap>,
 }
 
@@ -93,6 +94,7 @@ struct FunctionBuilder<'a, 'b> {
 #[derive(Debug)]
 enum Type<'a> {
     Int(u8),
+    IntSign,
     Fp32,
     ConstantString,
     Opaque { bits: u8 },
@@ -127,6 +129,11 @@ pub(crate) enum Instruction {
     Sys { id: u32 },
 }
 
+enum Int32 {
+    U(u32),
+    S(i32),
+}
+
 impl Program {
     pub fn from_collection(collection: &Collection, entry: &Str) -> Result<Self, Error> {
         let mut builder = ProgramBuilder::default();
@@ -156,7 +163,6 @@ impl Program {
             registers: builder.registers.into(),
             array_registers: builder.array_registers.into(),
             functions: builder.functions.into(),
-            strings_buffer: builder.strings_buffer.into(),
             sys_to_registers,
         })
     }
@@ -237,15 +243,13 @@ impl<'a> ProgramBuilder<'a> {
                         .collect();
                     Type::Group { fields }
                 }
-                &crate::Type::Builtin(b) => {
-                    let i = self.types_to_index[name];
-                    match b {
-                        BuiltinType::Int(bits) => Type::Int(bits),
-                        BuiltinType::Fp32 => Type::Fp32,
-                        BuiltinType::ConstantString => Type::ConstantString,
-                        BuiltinType::Opaque { bits } => Type::Opaque { bits },
-                    }
-                }
+                &crate::Type::Builtin(b) => match b {
+                    BuiltinType::Int(bits) => Type::Int(bits),
+                    BuiltinType::IntSign => Type::IntSign,
+                    BuiltinType::Fp32 => Type::Fp32,
+                    BuiltinType::ConstantString => Type::ConstantString,
+                    BuiltinType::Opaque { bits } => Type::Opaque { bits },
+                },
             };
             self.types.push(ty);
         }
@@ -486,7 +490,7 @@ impl<'a> ProgramBuilder<'a> {
             let (register, ty) = self.register(&switch.register)?;
             match &self.types[ty.0 as usize] {
                 Type::ConstantString => todo!(),
-                Type::Int(_) | Type::Enum { .. } => {
+                Type::Int(_) | Type::Enum { .. } | Type::IntSign => {
                     let &RegisterMap::Unit { index: register } = register else {
                         todo!()
                     };
@@ -559,64 +563,53 @@ impl<'a> ProgramBuilder<'a> {
     fn get_or_add_const(&mut self, ty: TypeId, value: &'a Str) -> Result<u32, Error> {
         let value = {
             match &self.types[ty.0 as usize] {
-                Type::Int(32) | Type::Opaque { bits: 32 } => {
-                    self.parse_integer32(value)?.to_ne_bytes().to_vec()
+                Type::Int(bits) | Type::Opaque { bits } => {
+                    Constant::Int(self.parse_integer(value, *bits)?)
                 }
-                Type::Int(n) if *n <= 8 => self.parse_integer8(value)?.to_ne_bytes().to_vec(),
-                Type::Int(bits) => todo!("int {bits}"),
-                Type::Opaque { bits } => todo!("opaque {bits}"),
-                Type::Fp32 => self.parse_fp32(value)?.to_ne_bytes().to_vec(),
-                Type::ConstantString => {
-                    let (offt, len) = self.parse_constant_string(value)?;
-                    let mut b = [0; 8];
-                    b[..4].copy_from_slice(&offt.to_ne_bytes());
-                    b[4..].copy_from_slice(&len.to_ne_bytes());
-                    b.to_vec()
+                Type::IntSign => {
+                    let v = self.parse_integer(value, 2)?;
+                    // keep in range 0..=2 to simplify things
+                    let v = match v as i32 {
+                        0 => 0,
+                        1 => 1,
+                        3 => 2,
+                        v => todo!("{v}"),
+                    };
+                    Constant::Int(v)
                 }
-                Type::Enum { value_to_id } => {
-                    let id = value_to_id[value];
-                    if value_to_id.len() < 1 << 8 {
-                        (id as u8).to_ne_bytes().to_vec()
-                    } else if value_to_id.len() < 1 << 16 {
-                        (id as u16).to_ne_bytes().to_vec()
-                    } else if value_to_id.len() < 1 << 32 {
-                        (id as u32).to_ne_bytes().to_vec()
-                    } else {
-                        (id as u64).to_ne_bytes().to_vec()
-                    }
-                }
+                // TODO handle underscores
+                Type::Fp32 => Constant::Fp(value.parse::<f32>().unwrap().to_bits()),
+                Type::ConstantString => Constant::Str(self.parse_constant_string(value)?),
+                Type::Enum { value_to_id } => Constant::Int(value_to_id[value]),
                 Type::Group { .. } => todo!("group constants?"),
             }
         };
-
-        let value = value.into_boxed_slice();
 
         let i = self
             .constant_to_index
             .entry(value.clone())
             .or_insert_with(|| {
                 let i = u32::try_from(self.constants.len()).unwrap();
-                self.constants.push(Constant { value });
+                self.constants.push(value);
                 i
             });
 
         Ok(*i)
     }
 
-    fn parse_constant_string(&mut self, value: &Str) -> Result<(u32, u32), Error> {
-        let offt = u32::try_from(self.strings_buffer.len()).unwrap();
-
+    fn parse_constant_string(&mut self, value: &Str) -> Result<Box<[u8]>, Error> {
         let mut it = value.bytes();
         if it.next() != Some(b'"') {
             todo!();
         }
 
+        let mut s = Vec::new();
         loop {
             let c = it.next().unwrap();
             match c {
                 b'\\' => todo!(),
                 b'"' => break,
-                c => self.strings_buffer.push(c),
+                c => s.push(c),
             }
         }
 
@@ -624,21 +617,30 @@ impl<'a> ProgramBuilder<'a> {
             todo!();
         }
 
-        let len = u32::try_from(self.strings_buffer.len()).unwrap() - offt;
-
-        Ok((offt, len))
+        Ok(s.into())
     }
 
-    fn parse_natural32(&mut self, value: &Str) -> Result<u32, Error> {
-        self.parse_natural128(value)
-            .and_then(|n| Ok(n.try_into().unwrap()))
+    fn parse_integer(&mut self, value: &Str, bits: u8) -> Result<u32, Error> {
+        let shift = 32 - u32::from(bits);
+        let max = u32::MAX >> shift;
+        let min = i32::MIN >> shift;
+        match self.parse_integer32(value)? {
+            Int32::U(n) => {
+                if n > max {
+                    todo!("{n} > {max}");
+                }
+                Ok(n)
+            }
+            Int32::S(n) => {
+                if n < min {
+                    todo!("{n} < {min}");
+                }
+                Ok(n as u32 & max)
+            }
+        }
     }
 
-    fn parse_integer8(&mut self, value: &Str) -> Result<i8, Error> {
-        Ok(self.parse_integer32(value)?.try_into().unwrap())
-    }
-
-    fn parse_integer32(&mut self, value: &Str) -> Result<i32, Error> {
+    fn parse_integer32(&mut self, value: &Str) -> Result<Int32, Error> {
         let (neg, s) = if value.starts_with("-") {
             (true, &value[1..])
         } else {
@@ -646,13 +648,10 @@ impl<'a> ProgramBuilder<'a> {
         };
         let n = self.parse_natural128(s)?;
         let n = i128::try_from(n).unwrap();
-        let n = i32::try_from(if neg { -n } else { n }).unwrap();
-        Ok(n)
-    }
-
-    fn parse_fp32(&mut self, value: &Str) -> Result<f32, Error> {
-        // FIXME
-        self.parse_integer32(value).map(|x| x as f32)
+        match neg {
+            true => Ok(Int32::S((n as i32).wrapping_neg())),
+            false => Ok(Int32::U(n as u32)),
+        }
     }
 
     fn parse_char(&mut self, value: &str) -> Result<u32, Error> {
@@ -711,6 +710,7 @@ impl<'a> ProgramBuilder<'a> {
     fn type_index_dimensions(&self, ty: TypeId) -> Option<Vec<u32>> {
         match &self.types[ty.0 as usize] {
             Type::Int(bits) => 1u32.checked_shl(u32::from(*bits)).map(|n| [n].into()),
+            Type::IntSign => Some([3].into()),
             Type::Fp32 => None,
             Type::ConstantString => None,
             // Don't allow indexing on opaque since
@@ -939,6 +939,7 @@ impl<'a> Type<'a> {
     pub fn bit_size(&self) -> u32 {
         match self {
             Self::Int(bits) => (*bits).into(),
+            Self::IntSign => 2,
             Self::Fp32 => 32,
             // offset + length
             Self::ConstantString => 32 + 32,

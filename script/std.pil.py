@@ -52,14 +52,6 @@ def int_op_neg32():
 = int32.sub
 """
 
-def int_op_cmp32(name):
-    yield f"""
-> int32.{name}
-| int32.sub
-| int32.sign
-= @{name}
-"""
-
 def int_op_to(from_bits, to_bits):
     yield f"""
 > int{from_bits}.to_{to_bits}
@@ -68,6 +60,7 @@ def int_op_to(from_bits, to_bits):
 """
 
 def int_ops(bits):
+    yield f"$ int{bits}:0 Int{bits}\n"
     yield f"$ int{bits}:1 Int{bits}\n"
     yield from int_op_add(bits)
     yield from int_op_unary('inc', bits)
@@ -96,7 +89,7 @@ def write_ops():
 = write.const_str:switch
 [ write.const_str:switch int1:0
 ? 1 write.const_str:loop
-! @noop
+! noop
 
 > write.int32
 . @32:1 int32:0
@@ -148,7 +141,7 @@ def write_ops():
 | write.byte
 = @write_stack:switch
 [ @write_stack:switch @8:index
-? 0 @noop
+? 0 noop
 ! @write_stack:loop
 """
 
@@ -159,7 +152,7 @@ $ @32:1 Int32
 $ @8:index Int5
 @ @8 Int5 Int8
 
-> @noop
+> noop
 <
 
 > @true
@@ -170,41 +163,64 @@ $ @8:index Int5
 + int1:0 0
 <
 
-[ @lt int2:0
+
+[ @lt intsign:0
 ? -1 @true
 ! @false
 
-[ @eq int2:0
+[ @eq intsign:0
 ? 0 @true
 ! @false
 
-[ @gt int2:0
+[ @gt intsign:0
 ? 1 @true
 ! @false
 
-[ @ge int2:0
-? 1 @true
-? 0 @true
-! @false
+
+[ @ge intsign:0
+? -1 @false
+! @true
+
+[ @ne intsign:0
+? 0 @false
+! @true
+
+[ @le intsign:0
+? 1 @false
+! @true
+"""
+
+def int_op_32():
+    yield from int_op_add32()
+    yield from int_op_neg32()
+    yield from int_op_inc32()
+    yield from int_op_dec32()
+    yield """\
+> int32.cmp
+| int32.sub
+= int32.sign
+"""
+    for name in ('eq', 'ne', 'gt', 'lt', 'ge', 'le'):
+        yield f"""\
+> int32.{name}
+| int32.cmp
+= @{name}
 """
 
 def all_ops():
     yield from other_ops()
     yield from write_ops()
+    yield from int_op_32()
     for i in range(1, 32):
         yield from int_ops(i)
     for i in range(1, 32):
         for k in range(1, 32):
             if i != k:
                 yield from int_op_to(i, k)
-    yield from int_op_add32()
-    yield from int_op_neg32()
-    yield from int_op_inc32()
-    yield from int_op_dec32()
-    yield from int_op_cmp32('lt')
-    yield from int_op_cmp32('eq')
-    yield from int_op_cmp32('gt')
-    yield from int_op_cmp32('ge')
+
+    yield '$ int32:0 Int32\n'
+    yield '$ int32:1 Int32\n'
+    yield '$ intsign:0 IntSign\n'
 
 if __name__ == '__main__':
     print(*all_ops(), sep='', end='')

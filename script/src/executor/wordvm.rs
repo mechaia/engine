@@ -1,7 +1,7 @@
 use {
     super::Error,
     crate::{
-        program::{Function, Instruction},
+        program::{Constant, Function, Instruction},
         Map, Program,
     },
     core::fmt,
@@ -89,6 +89,21 @@ impl WordVM {
             registers_size += words_for_bits(reg.bits) * reg.dimensions.iter().product::<u32>();
         }
 
+        let mut strings_offsets = Vec::new();
+        let mut strings_size = 0;
+        let mut strings_buffer = Vec::new();
+        for cst in program.constants.iter() {
+            match cst {
+                Constant::Fp(_) | Constant::Int(_) => strings_offsets.push((u32::MAX, u32::MAX)),
+                Constant::Str(s) => {
+                    let l = u32::try_from(s.len()).unwrap();
+                    strings_offsets.push((strings_size, l));
+                    strings_size += l;
+                    strings_buffer.extend(s.iter().copied());
+                }
+            }
+        }
+
         let mut conv = |i, f: &Function| {
             encoder
                 .label_to_address
@@ -107,12 +122,15 @@ impl WordVM {
                                 }
                             }
                             &Instruction::Set { to, from } => {
-                                let constant = &program.constants[from as usize];
-                                for (i, w) in constant.value.chunks(4).enumerate() {
-                                    let mut ww = [0; 4];
-                                    ww[..w.len()].copy_from_slice(w);
-                                    let value = u32::from_ne_bytes(ww);
-                                    encoder.op_set(value, r(to) + i as u32);
+                                match &program.constants[from as usize] {
+                                    Constant::Int(n) | Constant::Fp(n) => {
+                                        encoder.op_set(*n, r(to));
+                                    }
+                                    Constant::Str(_) => {
+                                        let (ptr, len) = strings_offsets[from as usize];
+                                        encoder.op_set(ptr, r(to) + 0);
+                                        encoder.op_set(len, r(to) + 1);
+                                    }
                                 }
                             }
                             &Instruction::ArrayAccess { array } => {
@@ -158,17 +176,10 @@ impl WordVM {
                 Function::Switch(s) => {
                     let register = register_offsets[s.register as usize];
                     for case in s.cases.iter() {
-                        let cst = &program.constants[case.constant as usize];
-                        for (i, w) in cst.value.chunks(4).enumerate() {
-                            let mut ww = [0; 4];
-                            // FIXME endianness
-                            ww[..w.len()].copy_from_slice(w);
-                            let v = u32::from_ne_bytes(ww);
-                            if i == 0 {
-                                encoder.op_cond_eq(register, v)
-                            } else {
-                                encoder.op_cond_andeq(register, v)
-                            }
+                        match &program.constants[case.constant as usize] {
+                            Constant::Int(n) => encoder.op_cond_eq(register, *n),
+                            Constant::Fp(_) => todo!(),
+                            Constant::Str(_) => todo!(),
                         }
                         encoder.op_cond_jump(case.function);
                     }
@@ -189,7 +200,7 @@ impl WordVM {
             conv(i, f);
         }
 
-        let (mut instructions, strings_offset) = encoder.finish(&program.strings_buffer);
+        let (mut instructions, strings_offset) = encoder.finish(&strings_buffer);
         let stack_size = program.max_call_depth();
 
         let sys_to_registers = program
@@ -335,12 +346,13 @@ impl fmt::Debug for WordVM {
             f.write_str("\n")?;
         }
 
-        let strings_buffer_end = *self
+        let strings_buffer_end = self
             .sys_to_registers
             .iter()
-            .flat_map(|(x, y)| [x, y])
+            .filter(|(x, _)| *x != u32::MAX)
+            .flat_map(|&(x, y)| [x, y])
             .min()
-            .unwrap();
+            .unwrap_or(self.instructions.len() as u32);
 
         f.write_str("strings buffer: ")?;
         for c in slice_u32_as_u8(

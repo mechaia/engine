@@ -1,25 +1,58 @@
 > fp32.lt
-| fp32.sub
-| fp32.sign
+| fp32.cmp
 = @lt
 
 > fp32.eq
-| fp32.sub
-| fp32.sign
+| fp32.cmp
 = @eq
 
 > fp32.gt
-| fp32.sub
-| fp32.sign
+| fp32.cmp
 = @gt
+
+> fp32.cmp
+| fp32.sub
+= fp32.sign.int
 
 > fp32.neg
 . fp32:1 fp32:0
 = fp32.sub
 
+> fp32.square
+. fp32:1 fp32:0
+= fp32.mul
+
+> fp32.min
+| @fp32.cmp_preserve_01
+= fp32.min:switch
+[ fp32.min:switch intsign:0
+? 1 @fp32.1to0
+! noop
+
+> fp32.max
+| @fp32.cmp_preserve_01
+= fp32.max:switch
+[ fp32.max:switch intsign:0
+? -1 @fp32.1to0
+! noop
+
+> fp32.clamp
+| fp32.max
+. fp32:1 fp32:2
+= fp32.min
+
+> @fp32.1to0
+. fp32:0 fp32:1
+<
+
+> @fp32.cmp_preserve_01
+. @Fp32 fp32:0
+| fp32.cmp
+. fp32:0 @Fp32
+<
+
+$ fp32:0 Fp32
+$ fp32:1 Fp32
 $ fp32:2 Fp32
-$ fp32:3 Fp32
-$ fp32:4 Fp32
-$ fp32:5 Fp32
-$ fp32:6 Fp32
-$ fp32:7 Fp32
+
+$ @Fp32 Fp32

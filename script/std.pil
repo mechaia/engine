@@ -3,7 +3,7 @@ $ @32:1 Int32
 $ @8:index Int5
 @ @8 Int5 Int8
 
-> @noop
+> noop
 <
 
 > @true
@@ -14,22 +14,31 @@ $ @8:index Int5
 + int1:0 0
 <
 
-[ @lt int2:0
+
+[ @lt intsign:0
 ? -1 @true
 ! @false
 
-[ @eq int2:0
+[ @eq intsign:0
 ? 0 @true
 ! @false
 
-[ @gt int2:0
+[ @gt intsign:0
 ? 1 @true
 ! @false
 
-[ @ge int2:0
-? 1 @true
-? 0 @true
-! @false
+
+[ @ge intsign:0
+? -1 @false
+! @true
+
+[ @ne intsign:0
+? 0 @false
+! @true
+
+[ @le intsign:0
+? 1 @false
+! @true
 
 > write.newline
 + int8:0 '\n'
@@ -52,7 +61,7 @@ $ @8:index Int5
 = write.const_str:switch
 [ write.const_str:switch int1:0
 ? 1 write.const_str:loop
-! @noop
+! noop
 
 > write.int32
 . @32:1 int32:0
@@ -104,8 +113,51 @@ $ @8:index Int5
 | write.byte
 = @write_stack:switch
 [ @write_stack:switch @8:index
-? 0 @noop
+? 0 noop
 ! @write_stack:loop
+
+> int32.add
+. @32:0 int32:0
++ int32:0 0
+| int32.sub
+. int32:1 int32:0
+. int32:0 @32:0
+= int32.sub
+
+> int32.neg
+. int32:1 int32:0
++ int32:0 0
+= int32.sub
+
+> int32.inc
++ int32:1 -1
+= int32.sub
+
+> int32.dec
++ int32:1 1
+= int32.sub
+> int32.cmp
+| int32.sub
+= int32.sign
+> int32.eq
+| int32.cmp
+= @eq
+> int32.ne
+| int32.cmp
+= @ne
+> int32.gt
+| int32.cmp
+= @gt
+> int32.lt
+| int32.cmp
+= @lt
+> int32.ge
+| int32.cmp
+= @ge
+> int32.le
+| int32.cmp
+= @le
+$ int1:0 Int1
 $ int1:1 Int1
 
 > int1.add
@@ -125,6 +177,7 @@ $ int1:1 Int1
 | int1.to_32
 | int32.dec
 = int32.to_1
+$ int2:0 Int2
 $ int2:1 Int2
 
 > int2.add
@@ -144,6 +197,7 @@ $ int2:1 Int2
 | int2.to_32
 | int32.dec
 = int32.to_2
+$ int3:0 Int3
 $ int3:1 Int3
 
 > int3.add
@@ -163,6 +217,7 @@ $ int3:1 Int3
 | int3.to_32
 | int32.dec
 = int32.to_3
+$ int4:0 Int4
 $ int4:1 Int4
 
 > int4.add
@@ -182,6 +237,7 @@ $ int4:1 Int4
 | int4.to_32
 | int32.dec
 = int32.to_4
+$ int5:0 Int5
 $ int5:1 Int5
 
 > int5.add
@@ -201,6 +257,7 @@ $ int5:1 Int5
 | int5.to_32
 | int32.dec
 = int32.to_5
+$ int6:0 Int6
 $ int6:1 Int6
 
 > int6.add
@@ -220,6 +277,7 @@ $ int6:1 Int6
 | int6.to_32
 | int32.dec
 = int32.to_6
+$ int7:0 Int7
 $ int7:1 Int7
 
 > int7.add
@@ -239,6 +297,7 @@ $ int7:1 Int7
 | int7.to_32
 | int32.dec
 = int32.to_7
+$ int8:0 Int8
 $ int8:1 Int8
 
 > int8.add
@@ -258,6 +317,7 @@ $ int8:1 Int8
 | int8.to_32
 | int32.dec
 = int32.to_8
+$ int9:0 Int9
 $ int9:1 Int9
 
 > int9.add
@@ -277,6 +337,7 @@ $ int9:1 Int9
 | int9.to_32
 | int32.dec
 = int32.to_9
+$ int10:0 Int10
 $ int10:1 Int10
 
 > int10.add
@@ -296,6 +357,7 @@ $ int10:1 Int10
 | int10.to_32
 | int32.dec
 = int32.to_10
+$ int11:0 Int11
 $ int11:1 Int11
 
 > int11.add
@@ -315,6 +377,7 @@ $ int11:1 Int11
 | int11.to_32
 | int32.dec
 = int32.to_11
+$ int12:0 Int12
 $ int12:1 Int12
 
 > int12.add
@@ -334,6 +397,7 @@ $ int12:1 Int12
 | int12.to_32
 | int32.dec
 = int32.to_12
+$ int13:0 Int13
 $ int13:1 Int13
 
 > int13.add
@@ -353,6 +417,7 @@ $ int13:1 Int13
 | int13.to_32
 | int32.dec
 = int32.to_13
+$ int14:0 Int14
 $ int14:1 Int14
 
 > int14.add
@@ -372,6 +437,7 @@ $ int14:1 Int14
 | int14.to_32
 | int32.dec
 = int32.to_14
+$ int15:0 Int15
 $ int15:1 Int15
 
 > int15.add
@@ -391,6 +457,7 @@ $ int15:1 Int15
 | int15.to_32
 | int32.dec
 = int32.to_15
+$ int16:0 Int16
 $ int16:1 Int16
 
 > int16.add
@@ -410,6 +477,7 @@ $ int16:1 Int16
 | int16.to_32
 | int32.dec
 = int32.to_16
+$ int17:0 Int17
 $ int17:1 Int17
 
 > int17.add
@@ -429,6 +497,7 @@ $ int17:1 Int17
 | int17.to_32
 | int32.dec
 = int32.to_17
+$ int18:0 Int18
 $ int18:1 Int18
 
 > int18.add
@@ -448,6 +517,7 @@ $ int18:1 Int18
 | int18.to_32
 | int32.dec
 = int32.to_18
+$ int19:0 Int19
 $ int19:1 Int19
 
 > int19.add
@@ -467,6 +537,7 @@ $ int19:1 Int19
 | int19.to_32
 | int32.dec
 = int32.to_19
+$ int20:0 Int20
 $ int20:1 Int20
 
 > int20.add
@@ -486,6 +557,7 @@ $ int20:1 Int20
 | int20.to_32
 | int32.dec
 = int32.to_20
+$ int21:0 Int21
 $ int21:1 Int21
 
 > int21.add
@@ -505,6 +577,7 @@ $ int21:1 Int21
 | int21.to_32
 | int32.dec
 = int32.to_21
+$ int22:0 Int22
 $ int22:1 Int22
 
 > int22.add
@@ -524,6 +597,7 @@ $ int22:1 Int22
 | int22.to_32
 | int32.dec
 = int32.to_22
+$ int23:0 Int23
 $ int23:1 Int23
 
 > int23.add
@@ -543,6 +617,7 @@ $ int23:1 Int23
 | int23.to_32
 | int32.dec
 = int32.to_23
+$ int24:0 Int24
 $ int24:1 Int24
 
 > int24.add
@@ -562,6 +637,7 @@ $ int24:1 Int24
 | int24.to_32
 | int32.dec
 = int32.to_24
+$ int25:0 Int25
 $ int25:1 Int25
 
 > int25.add
@@ -581,6 +657,7 @@ $ int25:1 Int25
 | int25.to_32
 | int32.dec
 = int32.to_25
+$ int26:0 Int26
 $ int26:1 Int26
 
 > int26.add
@@ -600,6 +677,7 @@ $ int26:1 Int26
 | int26.to_32
 | int32.dec
 = int32.to_26
+$ int27:0 Int27
 $ int27:1 Int27
 
 > int27.add
@@ -619,6 +697,7 @@ $ int27:1 Int27
 | int27.to_32
 | int32.dec
 = int32.to_27
+$ int28:0 Int28
 $ int28:1 Int28
 
 > int28.add
@@ -638,6 +717,7 @@ $ int28:1 Int28
 | int28.to_32
 | int32.dec
 = int32.to_28
+$ int29:0 Int29
 $ int29:1 Int29
 
 > int29.add
@@ -657,6 +737,7 @@ $ int29:1 Int29
 | int29.to_32
 | int32.dec
 = int32.to_29
+$ int30:0 Int30
 $ int30:1 Int30
 
 > int30.add
@@ -676,6 +757,7 @@ $ int30:1 Int30
 | int30.to_32
 | int32.dec
 = int32.to_30
+$ int31:0 Int31
 $ int31:1 Int31
 
 > int31.add
@@ -4415,44 +4497,6 @@ $ int31:1 Int31
 > int31.to_30
 | int31.to_32
 = int32.to_30
-
-> int32.add
-. @32:0 int32:0
-+ int32:0 0
-| int32.sub
-. int32:1 int32:0
-. int32:0 @32:0
-= int32.sub
-
-> int32.neg
-. int32:1 int32:0
-+ int32:0 0
-= int32.sub
-
-> int32.inc
-+ int32:1 -1
-= int32.sub
-
-> int32.dec
-+ int32:1 1
-= int32.sub
-
-> int32.lt
-| int32.sub
-| int32.sign
-= @lt
-
-> int32.eq
-| int32.sub
-| int32.sign
-= @eq
-
-> int32.gt
-| int32.sub
-| int32.sign
-= @gt
-
-> int32.ge
-| int32.sub
-| int32.sign
-= @ge
+$ int32:0 Int32
+$ int32:1 Int32
+$ intsign:0 IntSign

@@ -43,9 +43,13 @@ pub(crate) enum Type {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum BuiltinType {
     Int(u8),
+    /// -1, 0 and 1
+    IntSign,
     Fp32,
     ConstantString,
-    Opaque { bits: u8 },
+    Opaque {
+        bits: u8,
+    },
 }
 
 #[derive(Debug)]
@@ -60,8 +64,9 @@ enum ErrorKind {
     ExpectedIdentifier,
     DuplicateType(String),
     DuplicateField,
-    OverlappingRegister(String),
+    DuplicateRegister(String),
     DuplicateFunction(String),
+    DuplicateConstant(String, String),
     ExpectedWord,
     ExpectedEndOfLine,
     ExpectedLine,
@@ -293,14 +298,14 @@ impl Collection {
             .or_default()
             .try_insert(name.into(), values)
             .map(|_| ())
-            .map_err(|_| todo!())
+            .map_err(|e| ErrorKind::DuplicateConstant(ty.into(), e.entry.key().to_string()))
     }
 
     fn line_parse_register(&mut self, line: &str) -> Result<(), ErrorKind> {
         let [name, ty] = next_words_eol(line)?;
         self.registers
             .try_insert(name, ty)
-            .map_err(|e| ErrorKind::OverlappingRegister(e.entry.key().to_string()))
+            .map_err(|e| ErrorKind::DuplicateRegister(e.entry.key().to_string()))
             .map(|_| ())
     }
 
@@ -308,7 +313,7 @@ impl Collection {
         let [name, index, value] = next_words_eol(line)?;
         self.array_registers
             .try_insert(name, (index, value))
-            .map_err(|e| ErrorKind::OverlappingRegister(e.entry.key().to_string()))
+            .map_err(|e| ErrorKind::DuplicateRegister(e.entry.key().to_string()))
             .map(|_| ())
     }
 
@@ -478,7 +483,7 @@ where
 
     fn try_insert(&mut self, key: K, value: V) -> Result<&mut V, ()> {
         if self.contains(&key) {
-            return Err(())
+            return Err(());
         }
         self.map.push((key, value));
         Ok(self.map.get_mut(self.map.len() - 1).unwrap().1)
@@ -509,7 +514,9 @@ where
 
 impl<K, V> Default for LinearMap<K, V> {
     fn default() -> Self {
-        Self { map: Default::default() }
+        Self {
+            map: Default::default(),
+        }
     }
 }
 
@@ -525,7 +532,9 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for LinearMap<K, V> {
 
 impl<K, V> FromIterator<(K, V)> for LinearMap<K, V> {
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
-        Self { map: iter.into_iter().collect() }
+        Self {
+            map: iter.into_iter().collect(),
+        }
     }
 }
 
@@ -595,10 +604,10 @@ mod test {
     fn stuff() {
         let mut col = super::Collection::default();
         col.add_standard().unwrap();
-        let s = include_str!("../examples/hello_world.pil");
         let s = include_str!("../examples/union.pil");
         let s = include_str!("../examples/group.pil");
         let s = include_str!("../examples/array.pil");
+        let s = include_str!("../examples/hello_world.pil");
         col.parse_text(s).unwrap();
         dbg!(&col);
         let mut prog = super::Program::from_collection(&col, &"start".to_string().into()).unwrap();
