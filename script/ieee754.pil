@@ -1,18 +1,32 @@
+% FpSign 0 1 -1 NaN
+
 > fp32.lt
 | fp32.cmp
-= @lt
+= @fp32.lt
 
-> fp32.eq
+> fp32.le
 | fp32.cmp
-= @eq
+= @fp32.le
 
 > fp32.gt
 | fp32.cmp
-= @gt
+= @fp32.gt
+
+> fp32.ge
+| fp32.cmp
+= @fp32.ge
+
+> fp32.eq
+| fp32.cmp
+= @fp32.eq
+
+> fp32.ne
+| fp32.cmp
+= @fp32.ne
 
 > fp32.cmp
 | fp32.sub
-= fp32.sign.int
+= fp32.sign
 
 > fp32.neg
 . fp32:1 fp32:0
@@ -25,14 +39,14 @@
 > fp32.min
 | @fp32.cmp_preserve_01
 = fp32.min:switch
-[ fp32.min:switch intsign:0
+[ fp32.min:switch fpsign:0
 ? 1 @fp32.1to0
 ! noop
 
 > fp32.max
 | @fp32.cmp_preserve_01
 = fp32.max:switch
-[ fp32.max:switch intsign:0
+[ fp32.max:switch fpsign:0
 ? -1 @fp32.1to0
 ! noop
 
@@ -42,24 +56,18 @@
 = fp32.min
 
 
-> fp32.copysign
-| fp32.to_int_bits
-. int32:1 0x8000_0000
-| int32.bitand
-. @Fp32.int32:0 int32:0
-. fp32:0 fp32:1
-| fp32.to_int_bits
-. int32:1 0x7fff_ffff
-| int32.bitand
-. int32:1 @Fp32.int32:0
-| int32.bitor
-= fp32.from_int_bits
-
-
-> fp32.is_nan
-. fp32:1 fp32:0
-| fp32.eq
-= int1.not
+#> fp32.copysign
+#| fp32.to_int_bits
+#+ int32:1 0x8000_0000
+#| int32.bitand
+#. @Fp32.int32:0 int32:0
+#. fp32:0 fp32:1
+#| fp32.to_int_bits
+#+ int32:1 0x7fff_ffff
+#| int32.bitand
+#. int32:1 @Fp32.int32:0
+#| int32.bitor
+#= fp32.from_int_bits
 
 
 > @fp32.1to0
@@ -72,6 +80,39 @@
 . fp32:0 @Fp32
 <
 
+[ @fp32.lt fpsign:0
+? -1 @true
+! @false
+
+[ @fp32.eq fpsign:0
+? 0 @true
+! @false
+
+[ @fp32.gt fpsign:0
+? 1 @true
+! @false
+
+# branch explicitly since we need to account for NaN
+[ @fp32.le fpsign:0
+? -1 @true
+? 0 @true
+! @false
+
+[ @fp32.ne fpsign:0
+? -1 @true
+? 1 @true
+! @false
+
+[ @fp32.ge fpsign:0
+? 1 @true
+? 0 @true
+! @false
+
+[ @fp32.is_nan fpsign:0
+? NaN @true
+! @false
+
+$ fpsign:0 FpSign
 $ fp32:0 Fp32
 $ fp32:1 Fp32
 $ fp32:2 Fp32

@@ -21,9 +21,9 @@ const FP_32_ADD: u32 = 4 << 5 | 0;
 const FP_32_SUB: u32 = 4 << 5 | 1;
 const FP_32_MUL: u32 = 4 << 5 | 2;
 const FP_32_DIV: u32 = 4 << 5 | 3;
-const FP_32_SIGN: u32 = 4 << 5 | 4;
+const FP_32_SIGNUM: u32 = 4 << 5 | 4;
 const FP_32_SQRT: u32 = 4 << 5 | 5;
-const FP_32_SIGN_INT: u32 = 4 << 5 | 29;
+const FP_32_SIGN: u32 = 4 << 5 | 29;
 const FP_32_TO_INT_BITS: u32 = 4 << 5 | 30;
 const FP_32_FROM_INT_BITS: u32 = 4 << 5 | 31;
 
@@ -45,15 +45,15 @@ pub(crate) fn add_ieee754(c: &mut Collection) -> Result<(), Error> {
     f("fp32.mul", FP_32_MUL)?;
     f("fp32.div", FP_32_DIV)?;
     let mut f = |n, s| add_fn(c, n, s, ["fp32:0"], ["fp32:0"]);
-    f("fp32.sign", FP_32_SIGN)?;
     f("fp32.sqrt", FP_32_SQRT)?;
+    f("fp32.signum", FP_32_SIGNUM)?;
 
     add_fn(
         c,
-        "fp32.sign.int",
-        FP_32_SIGN_INT,
+        "fp32.sign",
+        FP_32_SIGN,
         ["fp32:0"],
-        ["intsign:0"],
+        ["fpsign:0"],
     )?;
     add_fn(
         c,
@@ -280,11 +280,15 @@ pub mod wordvm {
             FP_32_SUB => h.in2out1_fp(|x, y| x - y)?,
             FP_32_MUL => h.in2out1_fp(|x, y| x * y)?,
             FP_32_DIV => h.in2out1_fp(|x, y| x / y)?,
-            FP_32_SIGN => h.in1out1_fp(super::f32_signum)?,
+            FP_32_SIGNUM => h.in1out1_fp(super::f32_signum)?,
             FP_32_SQRT => h.in1out1_fp(f32::sqrt)?,
-            FP_32_SIGN_INT => h.in1out1(|x| {
-                let s = super::f32_signum(f32::from_bits(x));
-                int2_intsign(s as i32 as u32 & 3)
+            FP_32_SIGN => h.in1out1(|x| {
+                let x = f32::from_bits(x);
+                if x.is_nan() {
+                    3
+                } else {
+                    int2_intsign(super::f32_signum(x) as i32 as u32 & 3)
+                }
             })?,
             FP_32_TO_INT_BITS | FP_32_FROM_INT_BITS => h.in1out1(|x| x)?,
 
@@ -315,6 +319,7 @@ pub mod wordvm {
 
     /// Convert int2 to a intsign, which is uses bitpatterns 0b00, 0b01 and 0b10 for 0, 1 and -1 respectively
     fn int2_intsign(x: u32) -> u32 {
+        debug_assert_eq!(x & !3, 0);
         x & !(x >> 1)
     }
 }
