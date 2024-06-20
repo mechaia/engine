@@ -44,7 +44,6 @@ struct OpEncoder {
 
 #[derive(Debug)]
 enum Resolve {
-    Full,
     Shift4,
 }
 
@@ -522,6 +521,7 @@ impl OpEncoder {
             .extend_from_slice(&[OP4_COND_EQ | (register << 4), value]);
     }
 
+    #[allow(dead_code)]
     fn op_cond_andeq(&mut self, register: u32, value: u32) {
         self.instructions
             .extend_from_slice(&[OP4_COND_ANDEQ | (register << 4), value]);
@@ -564,7 +564,6 @@ impl OpEncoder {
         for (&address, (resolve, label)) in self.resolve_label.iter() {
             let addr = self.label_to_address[label];
             match resolve {
-                Resolve::Full => self.instructions[address as usize] = addr,
                 Resolve::Shift4 => {
                     assert!(addr < u32::MAX >> 4);
                     self.instructions[address as usize] |= addr << 4;
@@ -587,20 +586,10 @@ fn words_for_bits(bits: u32) -> u32 {
     (bits + 31) / 32
 }
 
-fn words_for_bytes(bytes: u32) -> u32 {
-    (bytes + 3) / 4
-}
-
 fn slice_u32_as_u8(s: &[u32]) -> &[u8] {
     let len = s.len() * 4;
     let ptr = s.as_ptr().cast::<u8>();
     unsafe { core::slice::from_raw_parts(ptr, len) }
-}
-
-fn slice_u32_as_u8_mut(s: &mut [u32]) -> &mut [u8] {
-    let len = s.len() * 4;
-    let ptr = s.as_mut_ptr().cast::<u8>();
-    unsafe { core::slice::from_raw_parts_mut(ptr, len) }
 }
 
 fn extend_u32_from_u8(v: &mut Vec<u32>, s: &[u8]) {

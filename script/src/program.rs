@@ -221,12 +221,12 @@ impl fmt::Debug for Instruction {
 
 impl<'a> ProgramBuilder<'a> {
     fn collect_types(&mut self, collection: &'a Collection) -> Result<(), Error> {
-        for (i, (name, ty)) in collection.types.iter().enumerate() {
+        for (i, (name, _)) in collection.types.iter().enumerate() {
             let i = u32::try_from(i).unwrap();
             self.types_to_index.try_insert(name, TypeId(i)).unwrap();
         }
 
-        for (name, ty) in collection.types.iter() {
+        for (_, ty) in collection.types.iter() {
             let ty = match ty {
                 crate::Type::Enum(values) => {
                     let value_to_id = values
@@ -495,7 +495,7 @@ impl<'a> ProgramBuilder<'a> {
                         todo!()
                     };
                     let mut cases = Vec::new();
-                    for (i, (value, next)) in switch.branches.iter().enumerate() {
+                    for (value, next) in switch.branches.iter() {
                         let constant = self.get_or_add_const(ty, value)?;
                         let function = self.function(next)?;
                         cases.push(SwitchCase { constant, function });
@@ -518,16 +518,6 @@ impl<'a> ProgramBuilder<'a> {
         }
 
         Ok(())
-    }
-
-    fn ty(&self, name: &Str) -> Result<TypeId, Error> {
-        self.types_to_index
-            .get(name)
-            .ok_or_else(|| Error {
-                kind: ErrorKind::TypeNotFound(name.to_string()),
-                line: 0,
-            })
-            .copied()
     }
 
     fn register(&self, name: &'a Str) -> Result<(&RegisterMap<'a>, TypeId), Error> {
@@ -904,8 +894,8 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         field: &'a Str,
         register: &'a Str,
     ) -> Result<(), Error> {
-        let (group_reg, group_ty) = self.program.register(group)?;
-        let (reg, ty) = self.program.register(register)?;
+        let (group_reg, _) = self.program.register(group)?;
+        let (reg, _) = self.program.register(register)?;
 
         let RegisterMap::Group { fields } = group_reg else {
             todo!()
@@ -922,7 +912,7 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         Self::move_recursive(&mut self.instructions, to, from)
     }
 
-    fn finish(mut self, next: &'a Option<Str>) -> Result<FunctionBlock, Error> {
+    fn finish(self, next: &'a Option<Str>) -> Result<FunctionBlock, Error> {
         let next = next
             .as_ref()
             .map(|n| self.program.function(n))
@@ -948,13 +938,8 @@ impl<'a> Type<'a> {
                 .len()
                 .checked_next_power_of_two()
                 .map_or(usize::BITS, |x| x.try_into().unwrap()),
-            Self::Group { fields } => todo!(),
+            Self::Group { fields: _ } => todo!(),
         }
-    }
-
-    /// Minimum size in bytes.
-    pub fn byte_size(&self) -> u32 {
-        (self.bit_size() + 7) / 8
     }
 }
 

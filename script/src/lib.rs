@@ -53,12 +53,14 @@ pub(crate) enum BuiltinType {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct Error {
     line: usize,
     kind: ErrorKind,
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum ErrorKind {
     UnterminatedString,
     ExpectedIdentifier,
