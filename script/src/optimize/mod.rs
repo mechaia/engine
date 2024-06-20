@@ -4,7 +4,7 @@ use {
         Program,
     },
     core::mem,
-    util::bit::BitVec,
+    util::{bit::BitVec, LinearSet},
 };
 
 /// Very basic and fast optimizer.
@@ -372,36 +372,6 @@ enum RegisterValue {
     Constant(u32),
     /// Value mirrors a register.
     Alias(u32),
-}
-
-#[derive(Clone, Debug, Default)]
-struct LinearSet<T> {
-    set: Vec<T>,
-}
-
-impl<T: Eq> LinearSet<T> {
-    fn insert(&mut self, value: T) {
-        if !self.set.contains(&value) {
-            self.set.push(value);
-        }
-    }
-
-    fn remove(&mut self, value: &T) {
-        for (i, v) in self.set.iter().enumerate() {
-            if v == value {
-                self.set.swap_remove(i);
-                break;
-            }
-        }
-    }
-
-    fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
-        self.set.drain(..)
-    }
-
-    fn clear(&mut self) {
-        self.set.clear();
-    }
 }
 
 /// Break chains of moves.
