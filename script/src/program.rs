@@ -94,7 +94,6 @@ struct FunctionBuilder<'a, 'b> {
 #[derive(Debug)]
 enum Type<'a> {
     Int(u8),
-    IntSign,
     Fp32,
     ConstantString,
     Opaque { bits: u8 },
@@ -245,7 +244,6 @@ impl<'a> ProgramBuilder<'a> {
                 }
                 &crate::Type::Builtin(b) => match b {
                     BuiltinType::Int(bits) => Type::Int(bits),
-                    BuiltinType::IntSign => Type::IntSign,
                     BuiltinType::Fp32 => Type::Fp32,
                     BuiltinType::ConstantString => Type::ConstantString,
                     BuiltinType::Opaque { bits } => Type::Opaque { bits },
@@ -490,7 +488,7 @@ impl<'a> ProgramBuilder<'a> {
             let (register, ty) = self.register(&switch.register)?;
             match &self.types[ty.0 as usize] {
                 Type::ConstantString => todo!(),
-                Type::Int(_) | Type::Enum { .. } | Type::IntSign => {
+                Type::Int(_) | Type::Enum { .. } => {
                     let &RegisterMap::Unit { index: register } = register else {
                         todo!()
                     };
@@ -555,17 +553,6 @@ impl<'a> ProgramBuilder<'a> {
             match &self.types[ty.0 as usize] {
                 Type::Int(bits) | Type::Opaque { bits } => {
                     Constant::Int(self.parse_integer(value, *bits)?)
-                }
-                Type::IntSign => {
-                    let v = self.parse_integer(value, 2)?;
-                    // keep in range 0..=2 to simplify things
-                    let v = match v as i32 {
-                        0 => 0,
-                        1 => 1,
-                        3 => 2,
-                        v => todo!("{v}"),
-                    };
-                    Constant::Int(v)
                 }
                 // TODO handle underscores
                 Type::Fp32 => Constant::Fp(value.parse::<f32>().unwrap().to_bits()),
@@ -700,7 +687,6 @@ impl<'a> ProgramBuilder<'a> {
     fn type_index_dimensions(&self, ty: TypeId) -> Option<Vec<u32>> {
         match &self.types[ty.0 as usize] {
             Type::Int(bits) => 1u32.checked_shl(u32::from(*bits)).map(|n| [n].into()),
-            Type::IntSign => Some([3].into()),
             Type::Fp32 => None,
             Type::ConstantString => None,
             // Don't allow indexing on opaque since
@@ -929,7 +915,6 @@ impl<'a> Type<'a> {
     pub fn bit_size(&self) -> u32 {
         match self {
             Self::Int(bits) => (*bits).into(),
-            Self::IntSign => 2,
             Self::Fp32 => 32,
             // offset + length
             Self::ConstantString => 32 + 32,

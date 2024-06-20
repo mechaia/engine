@@ -43,8 +43,6 @@ pub(crate) enum Type {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum BuiltinType {
     Int(u8),
-    /// -1, 0 and 1
-    IntSign,
     Fp32,
     ConstantString,
     Opaque {

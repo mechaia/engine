@@ -147,6 +147,8 @@ def write_ops():
 
 def other_ops():
     yield """\
+% IntSign 0 1 -1
+
 $ @Int32:0 Int32
 $ @Int32:1 Int32
 $ @Int8:index Int5

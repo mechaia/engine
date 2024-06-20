@@ -88,9 +88,6 @@ fn add_integer(c: &mut Collection) -> Result<(), Error> {
             .unwrap();
     }
 
-    c.types
-        .try_insert("IntSign".into(), Type::Builtin(BuiltinType::IntSign))
-        .unwrap();
     add_fn(c, "intsign.to_2", INT_SIGN_TO_2, ["intsign:0"], ["int2:0"])?;
     add_fn(c, "int2.to_sign", INT_2_TO_SIGN, ["int2:0"], ["intsign:0"])?;
 
