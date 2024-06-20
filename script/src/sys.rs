@@ -5,11 +5,12 @@ const NAT_X_TO_32: u32 = 1 << 5;
 const INT_X_TO_32: u32 = 2 << 5;
 
 const INT_32_SUB: u32 = 3 << 5 | 0;
-const INT_32_SIGN: u32 = 3 << 5 | 1;
-const NAT_32_DIVMOD: u32 = 3 << 5 | 2;
+const INT_32_BITNAND: u32 = 3 << 5 | 1;
+const INT_32_SIGN: u32 = 3 << 5 | 3;
+const NAT_32_DIVMOD: u32 = 3 << 5 | 4;
 
-const INT_SIGN_TO_2: u32 = 3 << 5 | 3;
-const INT_2_TO_SIGN: u32 = 3 << 5 | 4;
+const INT_SIGN_TO_2: u32 = 3 << 5 | 6;
+const INT_2_TO_SIGN: u32 = 3 << 5 | 7;
 
 const CONST_STR_GET: u32 = 3 << 5 | 8;
 const CONST_STR_LEN: u32 = 3 << 5 | 9;
@@ -112,6 +113,8 @@ fn add_integer(c: &mut Collection) -> Result<(), Error> {
         ["int32:0", "int32:1"],
         ["int32:0", "int32:1"],
     )?;
+
+    add_fn(c, "int32.bitnand", INT_32_BITNAND, ["int32:0", "int32:1"], ["int32:0"])?;
 
     Ok(())
 }
@@ -260,6 +263,7 @@ pub mod wordvm {
             }
             CONST_STR_LEN => h.in2out1(|_, y| y)?,
             INT_32_SUB => h.in2out1(|x, y| x.wrapping_sub(y))?,
+            INT_32_BITNAND => h.in2out1(|x, y| !(x & y))?,
             INT_32_SIGN => h.in1out1(int_signum)?,
             NAT_32_DIVMOD => {
                 let (x, y) = (h.input(0)?, h.input(1)?);

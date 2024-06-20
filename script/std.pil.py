@@ -36,11 +36,11 @@ def int_op_dec32():
 def int_op_add32():
     yield """
 > int32.add
-. @32:0 int32:0
+. @Int32:0 int32:0
 + int32:0 0
 | int32.sub
 . int32:1 int32:0
-. int32:0 @32:0
+. int32:0 @Int32:0
 = int32.sub
 """
 
@@ -76,13 +76,13 @@ def write_ops():
 + int32:0 0
 = write.const_str:cond
 > write.const_str:loop
-. int32:0 @32:0
+. int32:0 @Int32:0
 | const_str.get
 | write.byte
 | int32.inc
 = write.const_str:cond
 > write.const_str:cond
-. @32:0 int32:0
+. @Int32:0 int32:0
 . int32:1 int32:0
 | const_str.len
 | int32.gt
@@ -92,7 +92,7 @@ def write_ops():
 ! noop
 
 > write.int32
-. @32:1 int32:0
+. @Int32:1 int32:0
 + int32:1 0
 | int32.lt
 = write.int32:switch
@@ -102,55 +102,55 @@ def write_ops():
 > write.int32:negative
 + int8:0 '-'
 | write.byte
-. int32:0 @32:1
+. int32:0 @Int32:1
 | int32.neg
-. @32:1 int32:0
+. @Int32:1 int32:0
 = write.nat32:loop
 
 > write.nat32
-. @32:1 int32:0
+. @Int32:1 int32:0
 = write.nat32:loop
 > write.nat32:loop
-. int32:0 @32:1
+. int32:0 @Int32:1
 + int32:1 10
 | int32.divmod
-. @32:1 int32:0
+. @Int32:1 int32:0
 + int32:0 '0'
 | int32.add
 | int32.to_8
 | @write_stack.push
 = write.nat32:switch
-[ write.nat32:switch @32:1
+[ write.nat32:switch @Int32:1
 ? 0 @write_stack
 ! write.nat32:loop
 
 > @write_stack.push
-{ @8 @8:index int8:0
-. int5:0 @8:index
+{ @Int8 @Int8:index int8:0
+. int5:0 @Int8:index
 | int5.inc
-. @8:index int5:0
+. @Int8:index int5:0
 <
 
 > @write_stack
 = @write_stack:switch
 > @write_stack:loop
-. int5:0 @8:index
+. int5:0 @Int8:index
 | int5.dec
-. @8:index int5:0
-} @8 @8:index int8:0
+. @Int8:index int5:0
+} @Int8 @Int8:index int8:0
 | write.byte
 = @write_stack:switch
-[ @write_stack:switch @8:index
+[ @write_stack:switch @Int8:index
 ? 0 noop
 ! @write_stack:loop
 """
 
 def other_ops():
     yield """\
-$ @32:0 Int32
-$ @32:1 Int32
-$ @8:index Int5
-@ @8 Int5 Int8
+$ @Int32:0 Int32
+$ @Int32:1 Int32
+$ @Int8:index Int5
+@ @Int8 Int5 Int8
 
 > noop
 <
@@ -199,6 +199,36 @@ def int_op_32():
 > int32.cmp
 | int32.sub
 = int32.sign
+
+
+> int32.bitnot
+. int32:1 int32:0
+= int32.bitnand
+
+> int32.bitand
+| int32.bitnand
+= int32.bitnot
+
+> int32.bitor
+. @Int32:0 int32:1
+| int32.bitnot
+. @Int32:1 int32:0
+. int32:0 @Int32:0
+| int32.bitnot
+. int32:1 @Int32:1
+= int32.bitnand
+
+> int32.bitxor
+. @Int32:1 int32:1
+. @Int32:0 int32:0
+| int32.bitor
+. int32:1 @Int32:1
+. @Int32:1 int32:0
+. int32:0 @Int32:0
+| int32.bitnand
+. int32:1 @Int32:1
+= int32.bitand
+
 """
     for name in ('eq', 'ne', 'gt', 'lt', 'ge', 'le'):
         yield f"""\

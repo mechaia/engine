@@ -41,6 +41,27 @@
 . fp32:1 fp32:2
 = fp32.min
 
+
+> fp32.copysign
+| fp32.to_int_bits
+. int32:1 0x8000_0000
+| int32.bitand
+. @Fp32.int32:0 int32:0
+. fp32:0 fp32:1
+| fp32.to_int_bits
+. int32:1 0x7fff_ffff
+| int32.bitand
+. int32:1 @Fp32.int32:0
+| int32.bitor
+= fp32.from_int_bits
+
+
+> fp32.is_nan
+. fp32:1 fp32:0
+| fp32.eq
+= int1.not
+
+
 > @fp32.1to0
 . fp32:0 fp32:1
 <
@@ -56,3 +77,4 @@ $ fp32:1 Fp32
 $ fp32:2 Fp32
 
 $ @Fp32 Fp32
+$ @Fp32.int32:0 Int32
