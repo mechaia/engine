@@ -1,13 +1,25 @@
 use {
     super::Error,
     crate::{
-        program::{Constant, Function, Instruction},
+        program::{self, Constant, Function, Instruction},
         Map, Program,
     },
     core::fmt,
 };
 
-pub mod sys {}
+pub mod debug {
+    #[derive(Clone, Copy, Debug)]
+    pub struct Map {
+        pub file: u32,
+        pub line: u32,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct WordVM {
+        pub instructions: Box<[Map]>,
+        pub registers: Box<[Map]>,
+    }
+}
 
 pub struct WordVM {
     instructions: Box<[u32]>,
@@ -71,12 +83,17 @@ const OP4_ARRAY_STORE: u32 = 12;
 const OP4_UNDEF: u32 = 15;
 
 impl WordVM {
-    pub fn from_program(program: &Program) -> Self {
+    pub fn from_program(
+        program: &Program,
+        debug: Option<&program::debug::Program>,
+    ) -> (Self, Option<debug::WordVM>) {
         let mut encoder = OpEncoder::default();
 
         let mut registers_size = 0;
         let mut register_offsets = Vec::new();
         let mut array_register_offsets = Vec::new();
+
+        let mut debug_instructions = Vec::new();
 
         for reg in program.registers.iter() {
             register_offsets.push(registers_size);
@@ -108,10 +125,11 @@ impl WordVM {
                 .label_to_address
                 .try_insert(i, encoder.cur())
                 .unwrap();
+            let f_debug = debug.map(|d| &d.functions[i as usize]);
             match f {
                 Function::Block(b) => {
-                    let mut instructions = b.instructions.iter();
-                    while let Some(instr) = instructions.next() {
+                    let mut instructions = b.instructions.iter().enumerate();
+                    while let Some((i, instr)) = instructions.next() {
                         let r = |i: u32| register_offsets[i as usize];
                         let l = |i: u32| words_for_bits(program.registers[i as usize].bits);
                         match instr {
@@ -139,7 +157,7 @@ impl WordVM {
                                 let mut stride =
                                     element_size * array.dimensions.iter().product::<u32>();
                                 for i in 0.. {
-                                    match instructions.next().unwrap() {
+                                    match instructions.next().unwrap().1 {
                                         &Instruction::ArrayIndex { index } => {
                                             stride /= array.dimensions[i];
                                             encoder.op_array_add(stride, r(index));
@@ -162,6 +180,15 @@ impl WordVM {
                             &Instruction::Call { address } => encoder.op_call(address),
                             &Instruction::Sys { id } => encoder.op_sys(id),
                         }
+                        if let Some(d) = f_debug {
+                            debug_instructions.resize(
+                                encoder.cur() as usize,
+                                debug::Map {
+                                    file: d.file,
+                                    line: d.instruction_to_line[i],
+                                },
+                            );
+                        }
                     }
                     if let Some(next) = b.next {
                         // elide redundant jump
@@ -174,13 +201,22 @@ impl WordVM {
                 }
                 Function::Switch(s) => {
                     let register = register_offsets[s.register as usize];
-                    for case in s.cases.iter() {
+                    for (i, case) in s.cases.iter().enumerate() {
                         match &program.constants[case.constant as usize] {
                             Constant::Int(n) => encoder.op_cond_eq(register, *n),
                             Constant::Fp(_) => todo!(),
                             Constant::Str(_) => todo!(),
                         }
                         encoder.op_cond_jump(case.function);
+                        if let Some(d) = f_debug {
+                            debug_instructions.resize(
+                                encoder.cur() as usize,
+                                debug::Map {
+                                    file: d.file,
+                                    line: d.instruction_to_line[i],
+                                },
+                            );
+                        }
                     }
                     if let Some(default) = s.default {
                         // elide redundant jump
@@ -191,6 +227,15 @@ impl WordVM {
                         encoder.instructions.push(OP4_UNDEF);
                     }
                 }
+            }
+            if let Some(d) = f_debug {
+                debug_instructions.resize(
+                    encoder.cur() as usize,
+                    debug::Map {
+                        file: d.file,
+                        line: d.last_line,
+                    },
+                );
             }
         };
 
@@ -225,13 +270,20 @@ impl WordVM {
             })
             .collect();
 
-        Self {
+        let vm = Self {
             instructions: instructions.into(),
             registers_size,
             stack_size,
             strings_offset,
             sys_to_registers,
-        }
+        };
+
+        let debug = debug.map(|_| debug::WordVM {
+            instructions: debug_instructions.into(),
+            registers: [].into(),
+        });
+
+        (vm, debug)
     }
 
     pub fn create_state(&self) -> WordVMState {
@@ -480,6 +532,10 @@ impl WordVMState {
             .get_mut(offset as usize)
             .ok_or(Error)
             .map(|r| *r = value)
+    }
+
+    pub fn pc(&self) -> u32 {
+        self.instruction_index
     }
 }
 

@@ -1,8 +1,51 @@
 use {
     crate::{BuiltinType, Collection, Error, ErrorKind, LinearMap, Map, Str},
-    core::fmt,
+    core::{fmt, hash::Hash, ops::Index},
     std::rc::Rc,
+    util::soa,
 };
+
+pub mod debug {
+    use crate::Str;
+
+    #[derive(Debug)]
+    pub struct Program {
+        pub(crate) constants: Box<[Constant]>,
+        pub(crate) registers: Box<[Register]>,
+        pub(crate) array_registers: Box<[ArrayRegister]>,
+        pub(crate) functions: Box<[Function]>,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct Constant {
+        pub name: Str,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct Register {
+        pub name: Str,
+        pub value: Str,
+        pub file: u32,
+        pub line: u32,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct ArrayRegister {
+        pub name: Str,
+        pub index: Str,
+        pub value: Str,
+        pub file: u32,
+        pub line: u32,
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct Function {
+        pub name: Str,
+        pub file: u32,
+        pub instruction_to_line: Box<[u32]>,
+        pub last_line: u32,
+    }
+}
 
 #[derive(Debug)]
 pub struct Program {
@@ -14,7 +57,7 @@ pub struct Program {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum Constant {
+pub(crate) enum Constant {
     Int(u32),
     Str(Box<[u8]>),
     // as bits so we can match exactly with Eq
@@ -22,12 +65,12 @@ pub enum Constant {
 }
 
 #[derive(Debug)]
-pub struct Register {
+pub(crate) struct Register {
     pub bits: u32,
 }
 
 #[derive(Debug)]
-pub struct ArrayRegister {
+pub(crate) struct ArrayRegister {
     pub bits: u32,
     pub dimensions: Rc<[u32]>,
 }
@@ -71,18 +114,23 @@ pub(crate) struct SysRegisterMap {
 
 #[derive(Debug, Default)]
 struct ProgramBuilder<'a> {
-    types_to_index: Map<&'a Str, TypeId>,
-    types: Vec<Type<'a>>,
+    types: IndexMapBuilder<&'a Str, TypeId, Type<'a>, ()>,
     group_constants: Vec<Option<&'a Map<Str, Map<Str, Str>>>>,
-    function_to_index: Map<&'a Str, u32>,
-    functions: Vec<Function>,
-    constant_to_index: Map<Constant, u32>,
-    constants: Vec<Constant>,
-    register_to_index: Map<&'a Str, (RegisterMap<'a>, TypeId)>,
-    registers: Vec<Register>,
-    array_register_to_index: Map<&'a Str, (RegisterMap<'a>, TypeId, TypeId)>,
-    array_registers: Vec<ArrayRegister>,
+    functions: IndexMapBuilder<&'a Str, u32, Function, debug::Function>,
+    constants: IndexMapBuilder<Constant, u32, Constant, debug::Constant>,
+    registers: IndexMapBuilder<&'a Str, (RegisterMap<'a>, TypeId), Register, debug::Register>,
+    array_registers: IndexMapBuilder<
+        &'a Str,
+        (RegisterMap<'a>, TypeId, TypeId),
+        ArrayRegister,
+        debug::ArrayRegister,
+    >,
     sys_to_registers: Map<u32, SysRegisterMap>,
+}
+
+struct IndexMapBuilder<K, I, T, U> {
+    to_index: Map<K, I>,
+    values: soa::Vec2<T, U>,
 }
 
 #[derive(Debug)]
@@ -134,7 +182,10 @@ enum Int32 {
 }
 
 impl Program {
-    pub fn from_collection(collection: &Collection, entry: &Str) -> Result<Self, Error> {
+    pub fn from_collection(
+        collection: &Collection,
+        entry: &Str,
+    ) -> Result<(Self, debug::Program), Error> {
         let mut builder = ProgramBuilder::default();
 
         let stub_entry = "".to_string().into_boxed_str();
@@ -157,13 +208,31 @@ impl Program {
             sys_to_registers[usize::try_from(k).unwrap()] = Some(v);
         }
 
-        Ok(Self {
-            constants: builder.constants.into(),
-            registers: builder.registers.into(),
-            array_registers: builder.array_registers.into(),
-            functions: builder.functions.into(),
+        fn f<T, U>(v: soa::Vec2<T, U>) -> (Box<[T]>, Box<[U]>) {
+            let (t, u) = v.into();
+            (t.into_boxed_slice(), u.into_boxed_slice())
+        }
+        let (constants, debug_constants) = f(builder.constants.values);
+        let (registers, debug_registers) = f(builder.registers.values);
+        let (array_registers, debug_array_registers) = f(builder.array_registers.values);
+        let (functions, debug_functions) = f(builder.functions.values);
+
+        let program = Self {
+            constants,
+            registers,
+            array_registers,
+            functions,
             sys_to_registers,
-        })
+        };
+
+        let debug = debug::Program {
+            constants: debug_constants,
+            registers: debug_registers,
+            array_registers: debug_array_registers,
+            functions: debug_functions,
+        };
+
+        Ok((program, debug))
     }
 
     pub fn max_call_depth(&self) -> u32 {
@@ -222,7 +291,7 @@ impl<'a> ProgramBuilder<'a> {
     fn collect_types(&mut self, collection: &'a Collection) -> Result<(), Error> {
         for (i, (name, _)) in collection.types.iter().enumerate() {
             let i = u32::try_from(i).unwrap();
-            self.types_to_index.try_insert(name, TypeId(i)).unwrap();
+            self.types.to_index.try_insert(name, TypeId(i)).unwrap();
         }
 
         for (_, ty) in collection.types.iter() {
@@ -238,7 +307,7 @@ impl<'a> ProgramBuilder<'a> {
                 crate::Type::Group(fields) => {
                     let fields = fields
                         .iter()
-                        .map(|(name, ty)| (name, self.types_to_index[ty]))
+                        .map(|(name, ty)| (name, self.types.to_index[ty]))
                         .collect();
                     Type::Group { fields }
                 }
@@ -249,38 +318,50 @@ impl<'a> ProgramBuilder<'a> {
                     BuiltinType::Opaque { bits } => Type::Opaque { bits },
                 },
             };
-            self.types.push(ty);
+            self.types.values.push((ty, ()));
         }
         Ok(())
     }
 
     fn collect_constants(&mut self, collection: &'a Collection) -> Result<(), Error> {
-        self.group_constants.resize(self.types.len(), None);
+        self.group_constants.resize(self.types.values.len(), None);
         for (ty, consts) in collection.constants.iter() {
-            let ty = self.types_to_index[ty];
+            let ty = self.types.to_index[ty];
             self.group_constants[ty.0 as usize] = Some(consts);
         }
         Ok(())
     }
 
     fn collect_registers(&mut self, collection: &'a Collection) -> Result<(), Error> {
-        for (name, ty) in collection.registers.iter() {
-            let ty = *self.types_to_index.get(ty).ok_or_else(|| todo!("{ty}"))?;
-            let regmap = self.expand_register_group(ty)?;
-            self.register_to_index
+        for (name, ty_s) in collection.registers.iter() {
+            let ty = *self
+                .types
+                .to_index
+                .get(ty_s)
+                .ok_or_else(|| todo!("{ty_s}"))?;
+            let regmap = self.expand_register_group(ty, name, ty_s, 1337, 1337)?;
+            self.registers
+                .to_index
                 .try_insert(name, (regmap, ty))
                 .unwrap();
         }
         Ok(())
     }
 
-    fn expand_register_group(&mut self, mut ty: TypeId) -> Result<RegisterMap<'a>, Error> {
+    fn expand_register_group(
+        &mut self,
+        mut ty: TypeId,
+        name: &'a Str,
+        value_ty: &'a Str,
+        file: u32,
+        line: u32,
+    ) -> Result<RegisterMap<'a>, Error> {
         // fuck this mutable borrow shit
         // per-field borrowing when?
         let mut stack = Vec::new();
 
         let regmap = 'l: loop {
-            match &self.types[usize::try_from(ty.0).unwrap()] {
+            match &self.types[ty] {
                 Type::Group { fields } => {
                     let mut it = fields.iter().map(|(a, b)| (*a, *b));
                     if let Some((name, ty_f)) = it.next() {
@@ -290,9 +371,15 @@ impl<'a> ProgramBuilder<'a> {
                     continue 'l;
                 }
                 tyty => {
-                    let index = u32::try_from(self.registers.len()).unwrap();
+                    let index = u32::try_from(self.registers.values.len()).unwrap();
                     let bits = tyty.bit_size();
-                    self.registers.push(Register { bits });
+                    let debug = debug::Register {
+                        name: name.clone(),
+                        value: value_ty.clone(),
+                        file,
+                        line,
+                    };
+                    self.registers.values.push((Register { bits }, debug));
 
                     let mut regmap = RegisterMap::Unit { index };
 
@@ -317,12 +404,15 @@ impl<'a> ProgramBuilder<'a> {
 
     fn collect_array_registers(&mut self, collection: &'a Collection) -> Result<(), Error> {
         for (name, (index_ty, value_ty)) in collection.array_registers.iter() {
-            let index_ty = self.types_to_index[index_ty];
-            let value_ty = self.types_to_index[value_ty];
-            let dimensions = self.type_index_dimensions(index_ty).unwrap().into();
-            let regmap = self.expand_array_register_group(value_ty, dimensions)?;
-            self.array_register_to_index
-                .try_insert(name, (regmap, index_ty, value_ty))
+            let index = self.types.to_index[index_ty];
+            let value = self.types.to_index[value_ty];
+            let dimensions = self.type_index_dimensions(index).unwrap().into();
+            let regmap = self.expand_array_register_group(
+                value, dimensions, name, index_ty, value_ty, 1337, 1337,
+            )?;
+            self.array_registers
+                .to_index
+                .try_insert(name, (regmap, index, value))
                 .unwrap();
         }
         Ok(())
@@ -332,13 +422,19 @@ impl<'a> ProgramBuilder<'a> {
         &mut self,
         mut ty: TypeId,
         dimensions: Rc<[u32]>,
+        name: &'a Str,
+        index_ty: &'a Str,
+        // TODO derive
+        value_ty: &'a Str,
+        file: u32,
+        line: u32,
     ) -> Result<RegisterMap<'a>, Error> {
         // fuck this mutable borrow shit
         // per-field borrowing when?
         let mut stack = Vec::new();
 
         let regmap = 'l: loop {
-            match &self.types[usize::try_from(ty.0).unwrap()] {
+            match &self.types[ty] {
                 Type::Group { fields } => {
                     let mut it = fields.iter().map(|(a, b)| (*a, *b));
                     if let Some((name, ty_f)) = it.next() {
@@ -348,11 +444,21 @@ impl<'a> ProgramBuilder<'a> {
                     continue 'l;
                 }
                 tyty => {
-                    let index = u32::try_from(self.array_registers.len()).unwrap();
-                    let bits = tyty.bit_size();
-                    let dimensions = dimensions.clone();
-                    self.array_registers
-                        .push(ArrayRegister { bits, dimensions });
+                    let index = u32::try_from(self.array_registers.values.len()).unwrap();
+                    let array = ArrayRegister {
+                        bits: tyty.bit_size(),
+                        dimensions: dimensions.clone(),
+                    };
+                    let debug = {
+                        debug::ArrayRegister {
+                            name: name.clone(),
+                            index: index_ty.clone(),
+                            value: value_ty.clone(),
+                            file,
+                            line,
+                        }
+                    };
+                    self.array_registers.values.push((array, debug));
 
                     let mut regmap = RegisterMap::Unit { index };
 
@@ -385,34 +491,52 @@ impl<'a> ProgramBuilder<'a> {
         let mut i = 0;
         // insert stub function as entry
         // it's an easy hack and is trivial to optimize anyway
-        self.function_to_index.try_insert(entry_stub, i).unwrap();
+        self.functions.to_index.try_insert(entry_stub, i).unwrap();
         i += 1;
         for (name, _) in collection.functions.iter() {
-            self.function_to_index.try_insert(name, i).unwrap();
+            self.functions.to_index.try_insert(name, i).unwrap();
             i += 1;
         }
         for (name, _) in collection.switches.iter() {
-            self.function_to_index.try_insert(name, i).unwrap();
+            self.functions.to_index.try_insert(name, i).unwrap();
             i += 1;
         }
 
-        self.functions.push(Function::Block(FunctionBlock {
-            instructions: Default::default(),
-            next: Some(self.function(entry)?),
-        }));
+        // entry stub
+        {
+            let f = FunctionBlock {
+                instructions: Default::default(),
+                next: Some(self.function(entry)?),
+            };
+            let debug = debug::Function {
+                name: entry_stub.clone(),
+                file: u32::MAX,
+                instruction_to_line: [].into(),
+                last_line: 0,
+            };
+            self.functions.push(Function::Block(f), debug);
+        }
 
-        for (_name, func) in collection.functions.iter() {
+        for (name, func) in collection.functions.iter() {
+            let mut instruction_to_line = Vec::new();
+            let file;
+            let last_line;
             let f = match func {
                 crate::Function::User {
                     instructions: instrs,
+                    file: f,
+                    last_line: ll,
+                    lines,
                     next,
                 } => {
+                    file = *f;
+                    last_line = *ll;
                     let mut builder = FunctionBuilder {
                         program: self,
                         instructions: Default::default(),
                     };
 
-                    for instr in instrs.iter() {
+                    for (instr, line) in instrs.iter().zip(lines.iter()) {
                         match instr {
                             crate::Instruction::Set { to, value } => builder.set(to, value)?,
                             crate::Instruction::Move { to, from } => builder.move_(to, from)?,
@@ -438,6 +562,7 @@ impl<'a> ProgramBuilder<'a> {
                                 register,
                             } => builder.from_group(group, field, register)?,
                         }
+                        instruction_to_line.resize(builder.instructions.len(), *line);
                     }
 
                     builder.finish(next)?
@@ -447,7 +572,9 @@ impl<'a> ProgramBuilder<'a> {
                     inputs,
                     outputs,
                 } => {
+                    file = u32::MAX;
                     let id = *id;
+                    last_line = id;
                     let f = |s: &[Str]| {
                         let mut v = Vec::new();
                         fn rec(v: &mut Vec<u32>, r: &RegisterMap<'_>) -> Result<(), Error> {
@@ -475,18 +602,25 @@ impl<'a> ProgramBuilder<'a> {
                         dbg!(e.entry.key());
                         todo!();
                     })?;
+                    instruction_to_line.push(id);
                     FunctionBlock {
                         instructions: [Instruction::Sys { id }].into(),
                         next: None,
                     }
                 }
             };
-            self.functions.push(Function::Block(f));
+            let debug = debug::Function {
+                name: name.clone(),
+                file,
+                instruction_to_line: instruction_to_line.into(),
+                last_line,
+            };
+            self.functions.push(Function::Block(f), debug);
         }
 
-        for (_name, switch) in collection.switches.iter() {
+        for (name, switch) in collection.switches.iter() {
             let (register, ty) = self.register(&switch.register)?;
-            match &self.types[ty.0 as usize] {
+            match &self.types[ty] {
                 Type::ConstantString => todo!(),
                 Type::Int(_) | Type::Enum { .. } => {
                     let &RegisterMap::Unit { index: register } = register else {
@@ -503,11 +637,18 @@ impl<'a> ProgramBuilder<'a> {
                         .as_ref()
                         .map(|s| self.function(s))
                         .transpose()?;
-                    self.functions.push(Function::Switch(FunctionSwitch {
+                    let f = FunctionSwitch {
                         register,
                         cases: cases.into(),
                         default,
-                    }));
+                    };
+                    let debug = debug::Function {
+                        name: name.clone(),
+                        file: 1337,
+                        instruction_to_line: vec![1337; switch.branches.len()].into(),
+                        last_line: 1337,
+                    };
+                    self.functions.push(Function::Switch(f), debug);
                 }
                 Type::Fp32 => todo!(),
                 Type::Opaque { .. } => todo!(),
@@ -519,7 +660,8 @@ impl<'a> ProgramBuilder<'a> {
     }
 
     fn register(&self, name: &'a Str) -> Result<(&RegisterMap<'a>, TypeId), Error> {
-        self.register_to_index
+        self.registers
+            .to_index
             .get(name)
             .map(|(x, y)| (x, *y))
             .ok_or_else(|| Error {
@@ -529,7 +671,8 @@ impl<'a> ProgramBuilder<'a> {
     }
 
     fn array_register(&self, name: &'a Str) -> Result<(&RegisterMap<'a>, TypeId, TypeId), Error> {
-        self.array_register_to_index
+        self.array_registers
+            .to_index
             .get(name)
             .map(|(x, y, z)| (x, *y, *z))
             .ok_or_else(|| Error {
@@ -539,7 +682,8 @@ impl<'a> ProgramBuilder<'a> {
     }
 
     fn function(&self, name: &Str) -> Result<u32, Error> {
-        self.function_to_index
+        self.functions
+            .to_index
             .get(name)
             .ok_or_else(|| Error {
                 kind: ErrorKind::FunctionNotFound(name.to_string()),
@@ -549,8 +693,8 @@ impl<'a> ProgramBuilder<'a> {
     }
 
     fn get_or_add_const(&mut self, ty: TypeId, value: &'a Str) -> Result<u32, Error> {
-        let value = {
-            match &self.types[ty.0 as usize] {
+        let val = {
+            match &self.types[ty] {
                 Type::Int(bits) | Type::Opaque { bits } => {
                     Constant::Int(self.parse_integer(value, *bits)?)
                 }
@@ -563,11 +707,15 @@ impl<'a> ProgramBuilder<'a> {
         };
 
         let i = self
-            .constant_to_index
-            .entry(value.clone())
+            .constants
+            .to_index
+            .entry(val.clone())
             .or_insert_with(|| {
-                let i = u32::try_from(self.constants.len()).unwrap();
-                self.constants.push(value);
+                let i = u32::try_from(self.constants.values.len()).unwrap();
+                let debug = debug::Constant {
+                    name: value.clone(),
+                };
+                self.constants.values.push((val, debug));
                 i
             });
 
@@ -685,7 +833,7 @@ impl<'a> ProgramBuilder<'a> {
     }
 
     fn type_index_dimensions(&self, ty: TypeId) -> Option<Vec<u32>> {
-        match &self.types[ty.0 as usize] {
+        match &self.types[ty] {
             Type::Int(bits) => 1u32.checked_shl(u32::from(*bits)).map(|n| [n].into()),
             Type::Fp32 => None,
             Type::ConstantString => None,
@@ -730,7 +878,7 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
                 let csts = &csts[value];
                 assert_eq!(fields.len(), csts.len());
 
-                let Type::Group { fields: ty_fields } = &self.program.types[ty.0 as usize] else {
+                let Type::Group { fields: ty_fields } = &self.program.types[ty] else {
                     todo!()
                 };
 
@@ -944,5 +1092,53 @@ impl SysRegisterMap {
         [&mut self.inputs, &mut self.outputs]
             .into_iter()
             .flat_map(|s| s.iter_mut())
+    }
+}
+
+impl<K, I, T, U> Default for IndexMapBuilder<K, I, T, U> {
+    fn default() -> Self {
+        Self {
+            to_index: Default::default(),
+            values: Default::default(),
+        }
+    }
+}
+
+impl<'a, K, T, U> IndexMapBuilder<K, u32, T, U> {
+    fn push(&mut self, value: T, debug: U) {
+        self.values.push((value, debug));
+    }
+}
+
+impl<'a, K, T, U> IndexMapBuilder<K, u32, T, U>
+where
+    K: Eq + Hash,
+{
+    fn insert(&mut self, key: K, value: T, debug: U) {
+        let i = u32::try_from(self.values.len()).unwrap();
+        self.to_index.try_insert(key, i).unwrap_or_else(|_| todo!());
+        self.push(value, debug);
+    }
+}
+
+impl<'a, T, U> Index<u32> for IndexMapBuilder<&'a Str, u32, T, U> {
+    type Output = T;
+
+    fn index(&self, index: u32) -> &Self::Output {
+        self.values.get(index as usize).unwrap().0
+    }
+}
+
+impl<'a, T, U> Index<TypeId> for IndexMapBuilder<&'a Str, TypeId, T, U> {
+    type Output = T;
+
+    fn index(&self, index: TypeId) -> &Self::Output {
+        self.values.get(index.0 as usize).unwrap().0
+    }
+}
+
+impl<K, I, T, U> fmt::Debug for IndexMapBuilder<K, I, T, U> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("TODO")
     }
 }

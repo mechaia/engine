@@ -48,13 +48,7 @@ pub(crate) fn add_ieee754(c: &mut Collection) -> Result<(), Error> {
     f("fp32.sqrt", FP_32_SQRT)?;
     f("fp32.signum", FP_32_SIGNUM)?;
 
-    add_fn(
-        c,
-        "fp32.sign",
-        FP_32_SIGN,
-        ["fp32:0"],
-        ["fpsign:0"],
-    )?;
+    add_fn(c, "fp32.sign", FP_32_SIGN, ["fp32:0"], ["fpsign:0"])?;
     add_fn(
         c,
         "fp32.to_int_bits",
@@ -111,7 +105,13 @@ fn add_integer(c: &mut Collection) -> Result<(), Error> {
         ["int32:0", "int32:1"],
     )?;
 
-    add_fn(c, "int32.bitnand", INT_32_BITNAND, ["int32:0", "int32:1"], ["int32:0"])?;
+    add_fn(
+        c,
+        "int32.bitnand",
+        INT_32_BITNAND,
+        ["int32:0", "int32:1"],
+        ["int32:0"],
+    )?;
 
     Ok(())
 }

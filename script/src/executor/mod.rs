@@ -1,4 +1,4 @@
-use crate::Program;
+use crate::{program, Program};
 
 pub mod wordvm;
 
@@ -10,6 +10,11 @@ pub enum Executable {
 #[derive(Debug)]
 pub enum Instance {
     WordVM(wordvm::WordVMState),
+}
+
+#[derive(Debug)]
+pub enum Debug {
+    WordVM(wordvm::debug::WordVM),
 }
 
 #[derive(Debug)]
@@ -27,8 +32,12 @@ impl Executable {
     /// External implementers MUST not use IDs below this limit.
     pub const RESERVED_MAX_ID: u32 = 255;
 
-    pub fn from_program(program: &Program) -> Self {
-        Self::WordVM(wordvm::WordVM::from_program(program))
+    pub fn from_program(
+        program: &Program,
+        debug: Option<&program::debug::Program>,
+    ) -> (Self, Option<Debug>) {
+        let (vm, debug) = wordvm::WordVM::from_program(program, debug);
+        (Self::WordVM(vm), debug.map(Debug::WordVM))
     }
 
     pub fn new_instance(&self) -> Instance {

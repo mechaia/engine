@@ -25,6 +25,7 @@ pub struct Collection {
     array_registers: Map<Str, (Str, Str)>,
     switches: Map<Str, Switch>,
     functions: Map<Str, Function>,
+    file_names: Vec<Str>,
 }
 
 /// Key-value map with keys in insertion order.
@@ -45,9 +46,7 @@ pub(crate) enum BuiltinType {
     Int(u8),
     Fp32,
     ConstantString,
-    Opaque {
-        bits: u8,
-    },
+    Opaque { bits: u8 },
 }
 
 #[derive(Debug)]
@@ -89,6 +88,9 @@ enum Function {
         instructions: Box<[Instruction]>,
         /// `None` if return, `Some` if jump.
         next: Option<Str>,
+        file: u32,
+        lines: Box<[u32]>,
+        last_line: u32,
     },
     Builtin {
         id: u32,
@@ -143,7 +145,10 @@ pub const BUILTIN_WRITE_CONSTANT_STRING: u32 = 0;
 pub const BUILTIN_WRITE_CHARACTER: u32 = 1;
 
 impl Collection {
-    pub fn parse_text(&mut self, text: &str) -> Result<(), Error> {
+    pub fn parse_text(&mut self, file_name: Option<&str>, text: &str) -> Result<(), Error> {
+        let file_name = file_name.unwrap_or("<n/a>");
+        self.file_names.push(file_name.into());
+
         let mut lines = Lines {
             lines: text.lines(),
             line: 0,
@@ -182,12 +187,12 @@ impl Collection {
 
     pub fn add_standard(&mut self) -> Result<(), Error> {
         sys::add_defaults(self)?;
-        self.parse_text(include_str!("../std.pil"))
+        self.parse_text(Some("builtin:std.pil"), include_str!("../std.pil"))
     }
 
     pub fn add_ieee754(&mut self) -> Result<(), Error> {
         sys::add_ieee754(self)?;
-        self.parse_text(include_str!("../ieee754.pil"))
+        self.parse_text(Some("builtin:ieee754.pil"), include_str!("../ieee754.pil"))
     }
 
     pub fn add_opaque(&mut self, name: &str, bits: u8) -> Result<(), Error> {
@@ -222,6 +227,10 @@ impl Collection {
             )
             .map(|_| ())
             .map_err(|e| Error::new(0, ErrorKind::DuplicateFunction(e.entry.key().to_string())))
+    }
+
+    pub fn file_id_to_name(&self, id: u32) -> Option<&str> {
+        self.file_names.get(id as usize).map(|s| &**s)
     }
 
     fn line_parse_type(&mut self, line: &str) -> Result<(), ErrorKind> {
@@ -366,39 +375,39 @@ impl Collection {
         let (name, line) = next_word(line)?;
         next_eol(line)?;
 
-        let mut instructions = Vec::new();
+        let mut instructions = util::soa::Vec2::new();
 
         let next = loop {
             let line = next_line(lines)?;
             let (word, line) = next_word(line)?;
-            match word {
+            let instr = match word {
                 "." => {
                     let [to, from] = next_words_eol(line)?;
-                    instructions.push(Instruction::Move { to, from });
+                    Instruction::Move { to, from }
                 }
                 "+" => {
                     let [to, value] = next_words_eol(line)?;
-                    instructions.push(Instruction::Set { to, value });
+                    Instruction::Set { to, value }
                 }
                 "{" => {
                     let [array, index, register] = next_words_eol(line)?;
-                    instructions.push(Instruction::ToArray {
+                    Instruction::ToArray {
                         index,
                         array,
                         register,
-                    });
+                    }
                 }
                 "}" => {
                     let [array, index, register] = next_words_eol(line)?;
-                    instructions.push(Instruction::FromArray {
+                    Instruction::FromArray {
                         index,
                         array,
                         register,
-                    });
+                    }
                 }
                 "|" => {
                     let [function] = next_words_eol(line)?;
-                    instructions.push(Instruction::Call { function });
+                    Instruction::Call { function }
                 }
                 "<" => {
                     next_eol(line)?;
@@ -410,27 +419,34 @@ impl Collection {
                 }
                 "(" => {
                     let [group, field, register] = next_words_eol(line)?;
-                    instructions.push(Instruction::ToGroup {
+                    Instruction::ToGroup {
                         group,
                         field,
                         register,
-                    });
+                    }
                 }
                 ")" => {
                     let [group, field, register] = next_words_eol(line)?;
-                    instructions.push(Instruction::FromGroup {
+                    Instruction::FromGroup {
                         group,
                         field,
                         register,
-                    });
+                    }
                 }
                 tk => todo!("{tk}"),
-            }
+            };
+            instructions.push((instr, u32::try_from(lines.line).unwrap()));
         };
+
+        let last_line = lines.line.try_into().unwrap();
+        let (instructions, lines) = <(Vec<_>, Vec<_>)>::from(instructions);
 
         let f = Function::User {
             instructions: instructions.into(),
+            lines: lines.into(),
+            file: u32::try_from(self.file_names.len() - 1).unwrap(),
             next: next.map(|s| s.into()),
+            last_line,
         };
 
         self.functions
@@ -608,17 +624,23 @@ mod test {
         let s = include_str!("../examples/group.pil");
         let s = include_str!("../examples/array.pil");
         let s = include_str!("../examples/hello_world.pil");
-        col.parse_text(s).unwrap();
+        col.parse_text(Some("test.pil"), s).unwrap();
         dbg!(&col);
-        let mut prog = super::Program::from_collection(&col, &"start".to_string().into()).unwrap();
+        let (mut prog, debug) =
+            super::Program::from_collection(&col, &"start".to_string().into()).unwrap();
+        dbg!(&prog, &debug);
+        //super::optimize::simple(&mut prog);
         dbg!(&prog);
-        super::optimize::simple(&mut prog);
-        dbg!(&prog);
-        let vm = super::executor::wordvm::WordVM::from_program(&prog);
-        dbg!(&vm);
+        let (vm, debug) = super::executor::wordvm::WordVM::from_program(&prog, Some(&debug));
+        dbg!(&vm, &debug);
         let mut exec = vm.create_state();
         loop {
             use {super::executor::wordvm::Yield, super::sys::wordvm::External};
+            if let Some(debug) = &debug {
+                let m = &debug.instructions[exec.pc() as usize];
+                let f = col.file_id_to_name(m.file).unwrap_or("<n/a>");
+                eprintln!("{}:{}", f, m.line);
+            }
             match exec
                 .step(&vm)
                 .inspect_err(|_| {
