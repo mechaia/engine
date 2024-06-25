@@ -1,27 +1,34 @@
 use {
     crate::{
-        program::{Function, Instruction, SwitchCase},
+        program::{debug, Function, Instruction, SwitchCase},
         Program,
     },
     core::mem,
     util::{bit::BitVec, LinearSet},
 };
 
-/// Very basic and fast optimizer.
-pub fn simple(program: &mut Program) {
-    sort_pre_order(program);
-    inline(program);
-    sort_pre_order(program);
+/// Only remove unused functions and registers.
+pub fn remove_dead(program: &mut Program, mut debug: Option<&mut debug::Program>) {
+    sort_pre_order(program, debug.as_deref_mut());
+    remove_unused_sys(program);
+    remove_unused_registers(program, debug.as_deref_mut());
+}
 
-    break_move_chains(program);
-    elide_redundant_moves(program);
+/// Very basic and fast optimizer.
+pub fn simple(program: &mut Program, mut debug: Option<&mut debug::Program>) {
+    sort_pre_order(program, debug.as_deref_mut());
+    inline(program, debug.as_deref_mut());
+    sort_pre_order(program, debug.as_deref_mut());
+
+    break_move_chains(program, debug.as_deref_mut());
+    elide_redundant_moves(program, debug.as_deref_mut());
 
     remove_unused_sys(program);
-    remove_unused_registers(program);
+    remove_unused_registers(program, debug.as_deref_mut());
 }
 
 /// Inline functions.
-fn inline(program: &mut Program) {
+fn inline(program: &mut Program, mut debug: Option<&mut debug::Program>) {
     let func_refcounts = count_function_references(program);
 
     // inline small functions and functions only referenced once by a direct call/jump
@@ -42,16 +49,17 @@ fn inline(program: &mut Program) {
             // These functions are usually simple constructors like vec3_new, which just copy registers
             let it = || b.instructions.iter();
             if it()
-                .filter(|i| matches!(i, Instruction::Move { .. }))
+                .filter(|i| {
+                    matches!(
+                        i,
+                        Instruction::RegisterLoad(_) | Instruction::RegisterStore(_)
+                    )
+                })
                 .count()
                 >= b.instructions.len() - 1
             {
-                let max = usize::from(b.next.is_none());
-                if it()
-                    .filter(|i| matches!(i, Instruction::Call { .. } | Instruction::Sys { .. }))
-                    .count()
-                    <= max
-                {
+                let max = usize::from(b.next == -1);
+                if it().filter(|i| matches!(i, Instruction::Call(_))).count() <= max {
                     return true;
                 }
             }
@@ -61,50 +69,79 @@ fn inline(program: &mut Program) {
 
     for i in (0..program.functions.len()).rev() {
         let mut new_instrs = Vec::new();
+        let mut new_lines = Vec::new();
+
+        let debug_f = debug.as_deref().map(|d| &d.functions[i]);
 
         match &program.functions[i] {
             Function::Block(b) => {
-                for &instr in b.instructions.iter() {
+                debug
+                    .as_deref()
+                    .map(|d| &d.functions[i])
+                    .map(|d| assert_eq!(b.instructions.len(), d.instruction_to_line.len()));
+                for (instr_i, &instr) in b.instructions.iter().enumerate() {
+                    let mut i2l = debug_f.map(|d| d.instruction_to_line[instr_i]);
                     match instr {
-                        Instruction::Call { mut address } => {
+                        Instruction::Call(mut address) => {
                             // inline recursively to avoid inserting redundant calls
                             loop {
                                 debug_assert_ne!(address as usize, i);
 
-                                if !should_inline[address as usize] {
-                                    new_instrs.push(Instruction::Call { address });
+                                if address < 0 || !should_inline[address as usize] {
+                                    if address != -1 {
+                                        new_instrs.push(Instruction::Call(address));
+                                        i2l.map(|l| new_lines.push(l));
+                                    }
                                     break;
                                 }
 
                                 let f_2 = &program.functions[address as usize];
                                 let Function::Block(b_2) = f_2 else { todo!() };
 
-                                new_instrs.extend_from_slice(&b_2.instructions);
-
-                                if let Some(next_2) = b_2.next {
-                                    address = next_2
-                                } else {
-                                    break;
+                                new_instrs.extend(b_2.instructions.iter());
+                                if let Some(d) =
+                                    debug.as_deref().map(|d| &d.functions[address as usize])
+                                {
+                                    new_lines.extend(d.instruction_to_line.iter());
+                                    i2l = Some(d.last_line);
                                 }
+                                assert_eq!(new_instrs.len(), new_lines.len());
+
+                                address = b_2.next;
                             }
                         }
-                        instr => new_instrs.push(instr),
+                        instr => {
+                            new_instrs.push(instr);
+                            i2l.map(|l| new_lines.push(l));
+                        }
                     }
                 }
 
                 let Function::Block(b) = &mut program.functions[i] else {
                     unreachable!()
                 };
+                let mut d = debug.as_deref_mut().map(|d| &mut d.functions[i]);
 
-                if b.next.is_none() {
+                while b.next == -1 {
                     match new_instrs.pop() {
-                        Some(Instruction::Call { address }) => b.next = Some(address),
-                        Some(n) => new_instrs.push(n),
-                        None => {}
+                        Some(Instruction::Call(address)) => {
+                            b.next = address;
+                            d.as_deref_mut()
+                                .map(|d| d.last_line = new_lines.pop().unwrap());
+                        }
+                        Some(n) => {
+                            new_instrs.push(n);
+                            break;
+                        }
+                        None => break,
                     }
                 }
 
                 b.instructions = new_instrs.into();
+                d.as_deref_mut()
+                    .map(|d| d.instruction_to_line = new_lines.into());
+
+                d.map(|d| assert_eq!(b.instructions.len(), d.instruction_to_line.len()));
             }
             Function::Switch(s) => {
                 let cases = s
@@ -130,7 +167,11 @@ fn inline(program: &mut Program) {
 fn count_function_references(program: &Program) -> Vec<u32> {
     let mut func_refcounts = vec![0; program.functions.len()];
     for f in program.functions.iter() {
-        visit_funcref(f, |x| func_refcounts[x as usize] += 1);
+        visit_funcref(f, |x| {
+            if x >= 0 {
+                func_refcounts[x as usize] += 1
+            }
+        });
     }
     func_refcounts[0] = u32::MAX;
     func_refcounts
@@ -139,9 +180,9 @@ fn count_function_references(program: &Program) -> Vec<u32> {
 /// Sort functions in pre-order, starting from the first function.
 ///
 /// This also removes unreferenced functions.
-fn sort_pre_order(program: &mut Program) {
-    fn f(new_list: &mut Vec<u32>, program: &Program, index: u32, visited: &mut BitVec) {
-        if visited.get(index as usize).unwrap() {
+fn sort_pre_order(program: &mut Program, debug: Option<&mut debug::Program>) {
+    fn f(new_list: &mut Vec<i32>, program: &Program, index: i32, visited: &mut BitVec) {
+        if index < 0 || visited.get(index as usize).unwrap() {
             return;
         }
         visited.set(index as usize, true);
@@ -155,31 +196,40 @@ fn sort_pre_order(program: &mut Program) {
     let mut new_list = Vec::new();
     f(&mut new_list, program, 0, &mut visited);
 
-    let mut remap_table = vec![u32::MAX; program.functions.len()];
+    let mut remap_table = vec![i32::MAX; program.functions.len()];
 
     for (i, k) in new_list.iter().enumerate() {
-        remap_table[*k as usize] = i as u32;
+        remap_table[*k as usize] = i as i32;
     }
 
     program.functions = new_list
         .iter()
-        .map(|&index| {
-            let mut f = mem::take(&mut program.functions[index as usize]);
-            visit_funcref_mut(&mut f, |x| *x = remap_table[*x as usize]);
+        .map(|&i| {
+            let mut f = mem::take(&mut program.functions[i as usize]);
+            visit_funcref_mut(&mut f, |x| {
+                if *x >= 0 {
+                    *x = remap_table[*x as usize]
+                }
+            });
             f
         })
         .collect();
+
+    if let Some(debug) = debug {
+        debug.functions = new_list
+            .iter()
+            .map(|&i| mem::take(&mut debug.functions[i as usize]))
+            .collect();
+    }
 }
 
 /// Visit all function references of the given function, i.e. calls and jumps.
-fn visit_funcref<F: FnMut(u32)>(function: &Function, mut f: F) {
+fn visit_funcref<F: FnMut(i32)>(function: &Function, mut f: F) {
     match function {
         Function::Block(b) => {
-            if let Some(x) = b.next {
-                f(x)
-            }
+            f(b.next);
             for instr in b.instructions.iter() {
-                if let Instruction::Call { address } = instr {
+                if let Instruction::Call(address) = instr {
                     f(*address)
                 }
             }
@@ -196,14 +246,12 @@ fn visit_funcref<F: FnMut(u32)>(function: &Function, mut f: F) {
 }
 
 /// Visit all function references of the given function, i.e. calls and jumps.
-fn visit_funcref_mut<F: FnMut(&mut u32)>(function: &mut Function, mut f: F) {
+fn visit_funcref_mut<F: FnMut(&mut i32)>(function: &mut Function, mut f: F) {
     match function {
         Function::Block(b) => {
-            if let Some(x) = b.next.as_mut() {
-                f(x)
-            }
+            f(&mut b.next);
             for instr in b.instructions.iter_mut() {
-                if let Instruction::Call { address } = instr {
+                if let Instruction::Call(address) = instr {
                     f(address)
                 }
             }
@@ -224,12 +272,18 @@ fn remove_unused_sys(program: &mut Program) {
     let mut referenced = BitVec::filled(program.sys_to_registers.len(), false);
     for f in program.functions.iter() {
         let Function::Block(b) = f else { continue };
+        let mut test_set = |a: i32| {
+            if a < 0 {
+                referenced.set(!a as usize, true);
+            }
+        };
         for instr in b.instructions.iter() {
-            let Instruction::Sys { id } = instr else {
+            let Instruction::Call(address) = instr else {
                 continue;
             };
-            referenced.set(usize::try_from(*id).unwrap(), true);
+            test_set(*address);
         }
+        test_set(b.next);
     }
     for (b, s) in referenced.iter().zip(program.sys_to_registers.iter_mut()) {
         if !b {
@@ -239,7 +293,7 @@ fn remove_unused_sys(program: &mut Program) {
 }
 
 /// Remove unused registers
-fn remove_unused_registers(program: &mut Program) {
+fn remove_unused_registers(program: &mut Program, debug: Option<&mut debug::Program>) {
     let mut referenced = BitVec::filled(program.registers.len(), false);
     let mut array_referenced = BitVec::filled(program.array_registers.len(), false);
 
@@ -248,26 +302,22 @@ fn remove_unused_registers(program: &mut Program) {
             Function::Block(b) => {
                 for instr in b.instructions.iter() {
                     match instr {
-                        &Instruction::Move { to, from } => {
-                            referenced.set(to as usize, true);
-                            referenced.set(from as usize, true);
-                        }
-                        &Instruction::ArrayAccess { array } => {
+                        Instruction::RegisterLoad(r)
+                        | Instruction::RegisterStore(r)
+                        | Instruction::ArrayStore(r)
+                        | Instruction::ArrayIndex(r) => referenced.set(*r as usize, true),
+                        &Instruction::ArrayAccess(array) => {
                             array_referenced.set(array as usize, true)
                         }
-                        Instruction::ArrayStore { register: reg }
-                        | Instruction::ArrayLoad { register: reg }
-                        | Instruction::Set { to: reg, .. }
-                        | Instruction::ArrayIndex { index: reg } => {
-                            referenced.set(*reg as usize, true)
+                        &Instruction::Call(address) => {
+                            if address < 0 {
+                                program.sys_to_registers[!address as usize]
+                                    .iter()
+                                    .flat_map(|m| m.iter_all())
+                                    .for_each(|r| referenced.set(r as usize, true));
+                            }
                         }
-                        &Instruction::Sys { id } => {
-                            program.sys_to_registers[id as usize]
-                                .iter()
-                                .flat_map(|m| m.iter_all())
-                                .for_each(|r| referenced.set(r as usize, true));
-                        }
-                        Instruction::Call { .. } => {}
+                        Instruction::ConstantLoad(_) => {}
                     }
                 }
             }
@@ -315,20 +365,16 @@ fn remove_unused_registers(program: &mut Program) {
             Function::Block(b) => {
                 for instr in b.instructions.iter_mut() {
                     match instr {
-                        Instruction::Move { to, from } => {
-                            *to = remap[*to as usize];
-                            *from = remap[*from as usize];
-                        }
-                        Instruction::ArrayAccess { array } => {
+                        Instruction::ArrayAccess(array) => {
                             *array = array_remap[*array as usize];
                         }
-                        Instruction::ArrayStore { register: reg }
-                        | Instruction::ArrayLoad { register: reg }
-                        | Instruction::Set { to: reg, .. }
-                        | Instruction::ArrayIndex { index: reg } => {
+                        Instruction::RegisterStore(reg)
+                        | Instruction::RegisterLoad(reg)
+                        | Instruction::ArrayStore(reg)
+                        | Instruction::ArrayIndex(reg) => {
                             *reg = remap[*reg as usize];
                         }
-                        Instruction::Sys { .. } | Instruction::Call { .. } => {}
+                        Instruction::ConstantLoad(_) | Instruction::Call(_) => {}
                     }
                 }
             }
@@ -346,20 +392,34 @@ fn remove_unused_registers(program: &mut Program) {
             assert_ne!(*reg, u32::MAX);
         }
     }
+
+    if let Some(d) = debug {
+        d.registers = referenced
+            .iter()
+            .enumerate()
+            .filter(|x| x.1)
+            .map(|x| mem::take(&mut d.registers[x.0]))
+            .collect();
+        d.array_registers = array_referenced
+            .iter()
+            .enumerate()
+            .filter(|x| x.1)
+            .map(|x| mem::take(&mut d.array_registers[x.0]))
+            .collect();
+    }
 }
 
 /// Flatten chain of jumps
 /// e.g. `JUMP X -> JUMP Y -> JUMP Z` becomes `JUMP Z`
-fn flatten_jump(program: &Program, mut start: u32) -> u32 {
-    loop {
+fn flatten_jump(program: &Program, mut start: i32) -> i32 {
+    while start >= 0 {
         let Function::Block(b) = &program.functions[start as usize] else {
             break;
         };
         if !b.instructions.is_empty() {
             break;
         }
-        let Some(addr) = b.next else { break };
-        start = addr;
+        start = b.next;
     }
     start
 }
@@ -377,7 +437,7 @@ enum RegisterValue {
 /// Break chains of moves.
 ///
 /// This allows removing redundant moves and sets in a later pass.
-fn break_move_chains(program: &mut Program) {
+fn break_move_chains(program: &mut Program, _debug: Option<&mut debug::Program>) {
     let it = || 0..program.registers.len();
     let mut values = it().map(|_| RegisterValue::Unknown).collect::<Box<_>>();
     let mut reverse_alias = it().map(|_| LinearSet::default()).collect::<Box<[_]>>();
@@ -419,32 +479,34 @@ fn break_move_chains(program: &mut Program) {
     for f in program.functions.iter_mut() {
         let Function::Block(b) = f else { continue };
         clear(&mut values, &mut reverse_alias);
+
+        let mut cur_value = RegisterValue::Unknown;
+
         for instr in b.instructions.iter_mut() {
             match instr {
-                &mut Instruction::Set { to, from } => {
-                    values[to as usize] = RegisterValue::Constant(from);
-                }
-                Instruction::Move { to, from } => {
+                Instruction::RegisterStore(to) => {
                     // remove aliases to this register
-                    set_unknown(&mut values, &mut reverse_alias, *to);
                     // do NOT try to be clever and "short-circuit" aliases in values[...]!!
                     // it will likely break with e.g. swizzles
                     // we may also miss some optimizations if we try
                     // instead, keep values[...] a chain and resolve iteratively
-                    match values[*from as usize] {
-                        RegisterValue::Unknown | RegisterValue::Alias(_) => {
-                            set_alias(&mut values, &mut reverse_alias, *from, *to);
-                            while let RegisterValue::Alias(fr) = values[*from as usize] {
-                                *from = fr;
-                            }
-                        }
-                        RegisterValue::Constant(cst) => {
-                            values[*to as usize] = RegisterValue::Constant(cst);
-                            *instr = Instruction::Set { to: *to, from: cst };
+                    set_unknown(&mut values, &mut reverse_alias, *to);
+                    values[*to as usize] = cur_value;
+                    if let RegisterValue::Alias(from) = cur_value {
+                        reverse_alias[from as usize].insert(*to);
+                    }
+                }
+                Instruction::ConstantLoad(cst) => cur_value = RegisterValue::Constant(*cst),
+                Instruction::RegisterLoad(from) => {
+                    cur_value = RegisterValue::Alias(*from);
+                    while let RegisterValue::Alias(v) = cur_value {
+                        match values[v as usize] {
+                            RegisterValue::Unknown => break,
+                            v => cur_value = v,
                         }
                     }
                 }
-                Instruction::ArrayStore { register: r } | Instruction::ArrayIndex { index: r } => {
+                Instruction::ArrayStore(r) | Instruction::ArrayIndex(r) => {
                     match values[*r as usize] {
                         RegisterValue::Unknown | RegisterValue::Constant(_) => {}
                         RegisterValue::Alias(reg) => {
@@ -452,89 +514,94 @@ fn break_move_chains(program: &mut Program) {
                         }
                     }
                 }
-                Instruction::Call { .. } => {
-                    clear(&mut values, &mut reverse_alias);
-                }
-                &mut Instruction::Sys { id } => {
-                    let sys = program.sys_to_registers[id as usize].as_ref().unwrap();
-                    for &i in sys.outputs.iter() {
-                        set_unknown(&mut values, &mut reverse_alias, i)
+                Instruction::Call(address) => {
+                    if *address < 0 {
+                        let sys = program.sys_to_registers[!*address as usize]
+                            .as_ref()
+                            .unwrap();
+                        for &i in sys.outputs.iter() {
+                            set_unknown(&mut values, &mut reverse_alias, i)
+                        }
+                    } else {
+                        clear(&mut values, &mut reverse_alias);
                     }
                 }
-                Instruction::ArrayAccess { .. } => {}
-                Instruction::ArrayLoad { register } => {
-                    set_unknown(&mut values, &mut reverse_alias, *register)
-                }
+                Instruction::ArrayAccess(_) => cur_value = RegisterValue::Unknown,
             }
         }
     }
 }
 
 /// Remove moves and sets with no observable effect.
-fn elide_redundant_moves(program: &mut Program) {
+fn elide_redundant_moves(program: &mut Program, mut debug: Option<&mut debug::Program>) {
     let mut set = BitVec::filled(program.registers.len(), false);
     let used = find_read_registers(program);
 
-    for f in program.functions.iter_mut() {
+    for (i_f, f) in program.functions.iter_mut().enumerate() {
         let Function::Block(b) = f else { continue };
         set.fill(false);
         let mut new_instrs = Vec::new();
-        let mut keep_array_access = true;
-        for &instr in b.instructions.iter().rev() {
+        let mut new_lines = Vec::new();
+
+        let mut debug_f = debug.as_deref_mut().map(|d| &mut d.functions[i_f]);
+
+        let mut keep_accessor = true;
+        for (i_instr, &instr) in b.instructions.iter().enumerate().rev() {
             let mut test_set = |r| used.get(r as usize).unwrap() && !set.replace(r as usize, true);
             match instr {
-                Instruction::Move { to, from } if to == from => {}
-                Instruction::Set { to, .. } => {
-                    if test_set(to) {
+                Instruction::ConstantLoad(_) | Instruction::ArrayAccess(_) => {
+                    if keep_accessor {
                         new_instrs.push(instr);
                     }
                 }
-                Instruction::Move { to, from } => {
-                    if test_set(to) {
-                        new_instrs.push(instr);
-                    }
-                    // set 'from' to false since we're using it
-                    // useless if we did a 'break_move_chains' pass before,
-                    // but keep it for sanity
-                    set.set(from as usize, false);
-                }
-                Instruction::ArrayLoad { register } => {
-                    keep_array_access = test_set(register);
-                    if keep_array_access {
-                        new_instrs.push(instr);
-                    }
-                }
-                Instruction::ArrayIndex { index } => {
-                    if keep_array_access {
+                Instruction::ArrayIndex(index) => {
+                    if keep_accessor {
                         new_instrs.push(instr);
                     }
                     set.set(index as usize, false);
                 }
-                Instruction::ArrayAccess { .. } => {
-                    if keep_array_access {
+                Instruction::RegisterStore(reg) => {
+                    keep_accessor = test_set(reg);
+                    if keep_accessor {
                         new_instrs.push(instr);
                     }
                 }
-                Instruction::Call { .. } => {
-                    set.fill(false);
-                    new_instrs.push(instr);
+                Instruction::RegisterLoad(reg) => {
+                    if keep_accessor {
+                        if !matches!(new_instrs.last(), Some(Instruction::RegisterStore(r)) if *r == reg)
+                        {
+                            new_instrs.push(instr);
+                        }
+                    }
+                    set.set(reg as usize, false);
                 }
-                Instruction::Sys { id } => {
-                    let map = program.sys_to_registers[id as usize].as_ref().unwrap();
-                    map.outputs.iter().for_each(|&r| set.set(r as usize, true));
-                    map.inputs.iter().for_each(|&r| set.set(r as usize, false));
+                Instruction::Call(address) => {
+                    if address < 0 {
+                        let map = program.sys_to_registers[!address as usize]
+                            .as_ref()
+                            .unwrap();
+                        map.outputs.iter().for_each(|&r| set.set(r as usize, true));
+                        map.inputs.iter().for_each(|&r| set.set(r as usize, false));
+                    } else {
+                        set.fill(false);
+                    }
                     new_instrs.push(instr);
                 }
                 // TODO
-                Instruction::ArrayStore { register } => {
+                Instruction::ArrayStore(register) => {
                     set.set(register as usize, false);
                     new_instrs.push(instr);
-                    keep_array_access = true;
+                    keep_accessor = true;
                 }
             }
+            debug_f
+                .as_deref_mut()
+                .map(|d| new_lines.resize(new_instrs.len(), d.instruction_to_line[i_instr]));
         }
         new_instrs.reverse();
+        new_lines.reverse();
         b.instructions = new_instrs.into();
+        debug_f.map(|d| d.instruction_to_line = new_lines.into());
     }
 }
 
@@ -549,15 +616,19 @@ fn find_read_registers(program: &Program) -> BitVec {
             Function::Block(b) => {
                 for &instr in b.instructions.iter() {
                     match instr {
-                        Instruction::Move { from: r, .. }
-                        | Instruction::ArrayStore { register: r }
-                        | Instruction::ArrayIndex { index: r } => set.set(r as usize, true),
-                        Instruction::Sys { id } => program.sys_to_registers[id as usize]
-                            .as_ref()
-                            .unwrap()
-                            .inputs
-                            .iter()
-                            .for_each(|&r| set.set(r as usize, true)),
+                        Instruction::RegisterLoad(r)
+                        | Instruction::ArrayStore(r)
+                        | Instruction::ArrayIndex(r) => set.set(r as usize, true),
+                        Instruction::Call(id) => {
+                            if id < 0 {
+                                program.sys_to_registers[!id as usize]
+                                    .as_ref()
+                                    .unwrap()
+                                    .inputs
+                                    .iter()
+                                    .for_each(|&r| set.set(r as usize, true));
+                            }
+                        }
                         _ => {}
                     }
                 }

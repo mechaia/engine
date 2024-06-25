@@ -1,5 +1,7 @@
 use crate::{BuiltinType, Collection, Error, ErrorKind, Function, Type};
 
+const NOOP: u32 = 0;
+
 const INT_32_TO_X: u32 = 0 << 5;
 const NAT_X_TO_32: u32 = 1 << 5;
 const INT_X_TO_32: u32 = 2 << 5;
@@ -248,6 +250,7 @@ pub mod wordvm {
         };
 
         match id {
+            NOOP => {}
             CONST_STR_GET => {
                 let offt = h.input(0)?;
                 let len = h.input(1)?;

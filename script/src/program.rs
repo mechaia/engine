@@ -16,34 +16,37 @@ pub mod debug {
         pub(crate) functions: Box<[Function]>,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub(crate) struct Constant {
         pub name: Str,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub(crate) struct Register {
         pub name: Str,
         pub value: Str,
-        pub file: u32,
-        pub line: u32,
+        pub line: Source,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub(crate) struct ArrayRegister {
         pub name: Str,
         pub index: Str,
         pub value: Str,
-        pub file: u32,
-        pub line: u32,
+        pub line: Source,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     pub(crate) struct Function {
         pub name: Str,
+        pub instruction_to_line: Box<[Source]>,
+        pub last_line: Source,
+    }
+
+    #[derive(Clone, Copy, Default, Debug)]
+    pub(crate) struct Source {
         pub file: u32,
-        pub instruction_to_line: Box<[u32]>,
-        pub last_line: u32,
+        pub line: u32,
     }
 }
 
@@ -90,20 +93,20 @@ pub(crate) enum Function {
 #[derive(Debug, Default)]
 pub(crate) struct FunctionBlock {
     pub instructions: Box<[Instruction]>,
-    pub next: Option<u32>,
+    pub next: i32,
 }
 
 #[derive(Debug)]
 pub(crate) struct FunctionSwitch {
     pub register: u32,
     pub cases: Box<[SwitchCase]>,
-    pub default: Option<u32>,
+    pub default: Option<i32>,
 }
 
 #[derive(Debug)]
 pub(crate) struct SwitchCase {
     pub constant: u32,
-    pub function: u32,
+    pub function: i32,
 }
 
 #[derive(Debug)]
@@ -116,7 +119,7 @@ pub(crate) struct SysRegisterMap {
 struct ProgramBuilder<'a> {
     types: IndexMapBuilder<&'a Str, TypeId, Type<'a>, ()>,
     group_constants: Vec<Option<&'a Map<Str, Map<Str, Str>>>>,
-    functions: IndexMapBuilder<&'a Str, u32, Function, debug::Function>,
+    functions: IndexMapBuilder<&'a Str, i32, Function, debug::Function>,
     constants: IndexMapBuilder<Constant, u32, Constant, debug::Constant>,
     registers: IndexMapBuilder<&'a Str, (RegisterMap<'a>, TypeId), Register, debug::Register>,
     array_registers: IndexMapBuilder<
@@ -154,26 +157,25 @@ struct TypeId(u32);
 
 #[derive(Clone, Copy)]
 pub(crate) enum Instruction {
-    /// Copy one register to another.
-    Move { to: u32, from: u32 },
-    /// Set register value based on value in constants map.
-    Set { to: u32, from: u32 },
-    /// Begin array access.
-    ArrayAccess { array: u32 },
-    /// Index next for current array access.
-    ArrayIndex { index: u32 },
-    /// Copy a register value to an array element.
+    /// Load a register value.
+    RegisterLoad(u32),
+    /// Store a register value.
+    RegisterStore(u32),
+
+    /// Load a function.
+    ConstantLoad(u32),
+
+    /// Start an array access.
+    ArrayAccess(u32),
+    /// Perform an index operation with the given register.
+    ArrayIndex(u32),
+    /// Store a register value into the array.
+    ArrayStore(u32),
+
+    /// Call a function
     ///
-    /// Ends the current array access.
-    ArrayStore { register: u32 },
-    /// Copy an array element value to a register.
-    ///
-    /// Ends the current array access.
-    ArrayLoad { register: u32 },
-    /// Jump and push return address.
-    Call { address: u32 },
-    /// Call a builtin function.
-    Sys { id: u32 },
+    /// If negative, it refers to a builtin function.
+    Call(i32),
 }
 
 enum Int32 {
@@ -217,6 +219,13 @@ impl Program {
         let (array_registers, debug_array_registers) = f(builder.array_registers.values);
         let (functions, debug_functions) = f(builder.functions.values);
 
+        for (f, d) in functions.iter().zip(debug_functions.iter()) {
+            match f {
+                Function::Block(b) => assert_eq!(b.instructions.len(), d.instruction_to_line.len()),
+                Function::Switch(s) => assert_eq!(s.cases.len(), d.instruction_to_line.len()),
+            }
+        }
+
         let program = Self {
             constants,
             registers,
@@ -240,7 +249,7 @@ impl Program {
         self._max_call_depth(0, &mut visited)
     }
 
-    fn _max_call_depth(&self, entry: u32, visited: &mut util::bit::BitVec) -> u32 {
+    fn _max_call_depth(&self, entry: i32, visited: &mut util::bit::BitVec) -> u32 {
         if visited.get(entry as usize).unwrap() {
             // FIXME
             return 0;
@@ -251,38 +260,44 @@ impl Program {
                 .instructions
                 .iter()
                 .flat_map(|i| match i {
-                    &Instruction::Call { address } => Some((address, 1)),
+                    &Instruction::Call(address) if address >= 0 => Some((address, 1)),
                     _ => None,
                 })
-                .chain(f.next.map(|a| (a, 0)))
+                .chain((f.next >= 0).then_some((f.next, 0)))
                 .map(|(a, n)| n + self._max_call_depth(a, visited))
                 .max()
                 .unwrap_or(0),
-            Function::Switch(s) => {
-                s.cases
-                    .iter()
-                    .map(|c| self._max_call_depth(c.function, visited))
-                    .max()
-                    .unwrap_or(0)
-                    + 1
-            }
+            Function::Switch(s) => s
+                .cases
+                .iter()
+                .map(|c| c.function)
+                .chain(s.default)
+                .filter(|&a| a >= 0)
+                .map(|a| self._max_call_depth(a, visited))
+                .max()
+                .unwrap_or(0),
         };
         visited.set(entry as usize, false);
         n
     }
 }
 
+impl Program {
+    pub fn to_bytes(&self, abi: u128) -> Vec<u8> {
+        todo!()
+    }
+}
+
 impl fmt::Debug for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Move { to, from } => write!(f, "MOVE    {to} {from}"),
-            Self::Set { to, from } => write!(f, "SET     {to} {from}"),
-            Self::ArrayAccess { array } => write!(f, "A.ACCES {array}"),
-            Self::ArrayIndex { index } => write!(f, "A.INDEX {index}"),
-            Self::ArrayStore { register } => write!(f, "A.STORE {register}"),
-            Self::ArrayLoad { register } => write!(f, "A.LOAD  {register}"),
-            Self::Call { address } => write!(f, "CALL    {address}"),
-            Self::Sys { id } => write!(f, "SYS     {id:?}"),
+            Self::RegisterLoad(from) => write!(f, "R.LOAD  {from}"),
+            Self::RegisterStore(to) => write!(f, "R.STORE {to}"),
+            Self::ConstantLoad(from) => write!(f, "C.LOAD  {from}"),
+            Self::ArrayAccess(array) => write!(f, "A.ACCES {array}"),
+            Self::ArrayIndex(index) => write!(f, "A.INDEX {index}"),
+            Self::ArrayStore(register) => write!(f, "A.STORE {register}"),
+            Self::Call(address) => write!(f, "CALL    {address}"),
         }
     }
 }
@@ -376,8 +391,7 @@ impl<'a> ProgramBuilder<'a> {
                     let debug = debug::Register {
                         name: name.clone(),
                         value: value_ty.clone(),
-                        file,
-                        line,
+                        line: debug::Source { file, line },
                     };
                     self.registers.values.push((Register { bits }, debug));
 
@@ -454,8 +468,7 @@ impl<'a> ProgramBuilder<'a> {
                             name: name.clone(),
                             index: index_ty.clone(),
                             value: value_ty.clone(),
-                            file,
-                            line,
+                            line: debug::Source { file, line },
                         }
                     };
                     self.array_registers.values.push((array, debug));
@@ -493,9 +506,17 @@ impl<'a> ProgramBuilder<'a> {
         // it's an easy hack and is trivial to optimize anyway
         self.functions.to_index.try_insert(entry_stub, i).unwrap();
         i += 1;
-        for (name, _) in collection.functions.iter() {
-            self.functions.to_index.try_insert(name, i).unwrap();
-            i += 1;
+        for (name, f) in collection.functions.iter() {
+            match f {
+                crate::Function::User { .. } => {
+                    self.functions.to_index.try_insert(name, i).unwrap();
+                    i += 1;
+                }
+                crate::Function::Builtin { id, .. } => {
+                    let id = !i32::try_from(*id).unwrap();
+                    self.functions.to_index.try_insert(name, id).unwrap();
+                }
+            }
         }
         for (name, _) in collection.switches.iter() {
             self.functions.to_index.try_insert(name, i).unwrap();
@@ -506,22 +527,18 @@ impl<'a> ProgramBuilder<'a> {
         {
             let f = FunctionBlock {
                 instructions: Default::default(),
-                next: Some(self.function(entry)?),
+                next: self.function(entry)?,
             };
             let debug = debug::Function {
                 name: entry_stub.clone(),
-                file: u32::MAX,
                 instruction_to_line: [].into(),
-                last_line: 0,
+                last_line: Default::default(),
             };
-            self.functions.push(Function::Block(f), debug);
+            self.functions.values.push((Function::Block(f), debug));
         }
 
         for (name, func) in collection.functions.iter() {
-            let mut instruction_to_line = Vec::new();
-            let file;
-            let last_line;
-            let f = match func {
+            match func {
                 crate::Function::User {
                     instructions: instrs,
                     file: f,
@@ -529,14 +546,15 @@ impl<'a> ProgramBuilder<'a> {
                     lines,
                     next,
                 } => {
-                    file = *f;
-                    last_line = *ll;
+                    let last_line = *ll;
+                    let src = |line| debug::Source { file: *f, line };
+                    let mut instruction_to_line = Vec::new();
                     let mut builder = FunctionBuilder {
                         program: self,
                         instructions: Default::default(),
                     };
 
-                    for (instr, line) in instrs.iter().zip(lines.iter()) {
+                    for (instr, &line) in instrs.iter().zip(lines.iter()) {
                         match instr {
                             crate::Instruction::Set { to, value } => builder.set(to, value)?,
                             crate::Instruction::Move { to, from } => builder.move_(to, from)?,
@@ -562,19 +580,24 @@ impl<'a> ProgramBuilder<'a> {
                                 register,
                             } => builder.from_group(group, field, register)?,
                         }
-                        instruction_to_line.resize(builder.instructions.len(), *line);
+                        instruction_to_line.resize(builder.instructions.len(), src(line));
                     }
 
-                    builder.finish(next)?
+                    let f = builder.finish(next)?;
+
+                    let debug = debug::Function {
+                        name: name.clone(),
+                        instruction_to_line: instruction_to_line.into(),
+                        last_line: src(last_line),
+                    };
+                    self.functions.values.push((Function::Block(f), debug));
                 }
                 crate::Function::Builtin {
                     id,
                     inputs,
                     outputs,
                 } => {
-                    file = u32::MAX;
                     let id = *id;
-                    last_line = id;
                     let f = |s: &[Str]| {
                         let mut v = Vec::new();
                         fn rec(v: &mut Vec<u32>, r: &RegisterMap<'_>) -> Result<(), Error> {
@@ -602,20 +625,8 @@ impl<'a> ProgramBuilder<'a> {
                         dbg!(e.entry.key());
                         todo!();
                     })?;
-                    instruction_to_line.push(id);
-                    FunctionBlock {
-                        instructions: [Instruction::Sys { id }].into(),
-                        next: None,
-                    }
                 }
             };
-            let debug = debug::Function {
-                name: name.clone(),
-                file,
-                instruction_to_line: instruction_to_line.into(),
-                last_line,
-            };
-            self.functions.push(Function::Block(f), debug);
         }
 
         for (name, switch) in collection.switches.iter() {
@@ -642,13 +653,16 @@ impl<'a> ProgramBuilder<'a> {
                         cases: cases.into(),
                         default,
                     };
+                    let src = |line| debug::Source {
+                        file: switch.file,
+                        line,
+                    };
                     let debug = debug::Function {
                         name: name.clone(),
-                        file: 1337,
-                        instruction_to_line: vec![1337; switch.branches.len()].into(),
-                        last_line: 1337,
+                        instruction_to_line: switch.lines.iter().map(|&l| src(l)).collect(),
+                        last_line: src(switch.last_line),
                     };
-                    self.functions.push(Function::Switch(f), debug);
+                    self.functions.values.push((Function::Switch(f), debug));
                 }
                 Type::Fp32 => todo!(),
                 Type::Opaque { .. } => todo!(),
@@ -681,7 +695,7 @@ impl<'a> ProgramBuilder<'a> {
             })
     }
 
-    fn function(&self, name: &Str) -> Result<u32, Error> {
+    fn function(&self, name: &Str) -> Result<i32, Error> {
         self.functions
             .to_index
             .get(name)
@@ -871,7 +885,8 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         match reg {
             &RegisterMap::Unit { index: to } => {
                 let from = self.program.get_or_add_const(ty, value)?;
-                self.instructions.push(Instruction::Set { to, from });
+                self.instructions.push(Instruction::ConstantLoad(from));
+                self.instructions.push(Instruction::RegisterStore(to));
             }
             RegisterMap::Group { fields } => {
                 let csts = &self.program.group_constants[ty.0 as usize].unwrap();
@@ -914,7 +929,8 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         use RegisterMap::*;
         match (to, from) {
             (&Unit { index: to }, &Unit { index: from }) => {
-                instructions.push(Instruction::Move { to, from });
+                instructions.push(Instruction::RegisterLoad(from));
+                instructions.push(Instruction::RegisterStore(to));
             }
             (Group { fields: to }, Group { fields: from }) => {
                 if to.len() != from.len() {
@@ -968,12 +984,12 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         use RegisterMap::*;
         match (array, register) {
             (&Unit { index: array }, &Unit { index: register }) => {
-                instructions.push(Instruction::ArrayAccess { array });
+                instructions.push(Instruction::ArrayAccess(array));
                 Self::array_recursive_index(instructions, index)?;
                 instructions.push(if is_to {
-                    Instruction::ArrayStore { register }
+                    Instruction::ArrayStore(register)
                 } else {
-                    Instruction::ArrayLoad { register }
+                    Instruction::RegisterStore(register)
                 });
             }
             (Group { fields: array }, Group { fields: register }) => {
@@ -992,7 +1008,7 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         index: &RegisterMap<'a>,
     ) -> Result<(), Error> {
         match index {
-            &RegisterMap::Unit { index } => instructions.push(Instruction::ArrayIndex { index }),
+            &RegisterMap::Unit { index } => instructions.push(Instruction::ArrayIndex(index)),
             RegisterMap::Group { fields } => {
                 for (_, v) in fields.iter() {
                     Self::array_recursive_index(instructions, v)?
@@ -1004,7 +1020,7 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
 
     fn call(&mut self, function: &'a Str) -> Result<(), Error> {
         let address = self.program.function(function)?;
-        self.instructions.push(Instruction::Call { address });
+        self.instructions.push(Instruction::Call(address));
         Ok(())
     }
 
@@ -1050,7 +1066,8 @@ impl<'a, 'b> FunctionBuilder<'a, 'b> {
         let next = next
             .as_ref()
             .map(|n| self.program.function(n))
-            .transpose()?;
+            .transpose()?
+            .unwrap_or(-1);
         Ok(FunctionBlock {
             instructions: self.instructions.into(),
             next,

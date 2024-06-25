@@ -80,6 +80,9 @@ struct Switch {
     register: Str,
     branches: Box<[(Str, Str)]>,
     default: Option<Str>,
+    file: u32,
+    lines: Box<[u32]>,
+    last_line: u32,
 }
 
 #[derive(Debug)]
@@ -333,8 +336,9 @@ impl Collection {
         // - have consistent compile output
         // - take in account optimizations done by the user, like putting common case first
         let mut branches = Vec::new();
+        let mut s_lines = Vec::new();
 
-        let default = loop {
+        let (default, last_line) = loop {
             let line = lines.next().ok_or(ErrorKind::ExpectedLine)?.trim_end();
             let Ok((word, line)) = next_word(line) else {
                 continue;
@@ -344,16 +348,17 @@ impl Collection {
                     let (value, line) = next_word(line)?;
                     let (function, line) = next_word(line)?;
                     branches.push((value.into(), function.into()));
+                    s_lines.push(lines.line as u32);
                     next_eol(line)?;
                 }
                 "]" => {
                     next_eol(line)?;
-                    break None;
+                    break (None, u32::MAX);
                 }
                 "!" => {
                     let (name, line) = next_word(line)?;
                     next_eol(line)?;
-                    break Some(name);
+                    break (Some(name), lines.line as u32);
                 }
                 tk => todo!("{tk}"),
             }
@@ -363,6 +368,9 @@ impl Collection {
             register: register.into(),
             branches: branches.into(),
             default: default.map(|d| d.into()),
+            file: self.cur_file(),
+            lines: s_lines.into(),
+            last_line,
         };
 
         self.switches
@@ -444,7 +452,7 @@ impl Collection {
         let f = Function::User {
             instructions: instructions.into(),
             lines: lines.into(),
-            file: u32::try_from(self.file_names.len() - 1).unwrap(),
+            file: self.cur_file(),
             next: next.map(|s| s.into()),
             last_line,
         };
@@ -453,6 +461,10 @@ impl Collection {
             .try_insert(name.into(), f)
             .map(|_| ())
             .map_err(|_| ErrorKind::DuplicateFunction(name.into()))
+    }
+
+    fn cur_file(&self) -> u32 {
+        u32::try_from(self.file_names.len() - 1).unwrap()
     }
 }
 
@@ -620,26 +632,28 @@ mod test {
     fn stuff() {
         let mut col = super::Collection::default();
         col.add_standard().unwrap();
-        let s = include_str!("../examples/union.pil");
-        let s = include_str!("../examples/group.pil");
         let s = include_str!("../examples/array.pil");
         let s = include_str!("../examples/hello_world.pil");
+        let s = include_str!("../examples/group.pil");
+        let s = include_str!("../examples/union.pil");
         col.parse_text(Some("test.pil"), s).unwrap();
         dbg!(&col);
-        let (mut prog, debug) =
+        let (mut prog, mut debug) =
             super::Program::from_collection(&col, &"start".to_string().into()).unwrap();
-        dbg!(&prog, &debug);
-        //super::optimize::simple(&mut prog);
-        dbg!(&prog);
+        dbg!(&debug, &prog);
+        super::optimize::simple(&mut prog, Some(&mut debug));
+        //super::optimize::remove_dead(&mut prog, Some(&mut debug));
+        dbg!(&debug, &prog);
         let (vm, debug) = super::executor::wordvm::WordVM::from_program(&prog, Some(&debug));
-        dbg!(&vm, &debug);
+        dbg!(&debug, &vm);
         let mut exec = vm.create_state();
         loop {
             use {super::executor::wordvm::Yield, super::sys::wordvm::External};
             if let Some(debug) = &debug {
-                let m = &debug.instructions[exec.pc() as usize];
-                let f = col.file_id_to_name(m.file).unwrap_or("<n/a>");
-                eprintln!("{}:{}", f, m.line);
+                if let Some(m) = debug.instructions.get(exec.pc() as usize) {
+                    let f = col.file_id_to_name(m.file).unwrap_or("<n/a>");
+                    eprintln!("{:>4} -> {}:{}", exec.pc(), f, m.line);
+                }
             }
             match exec
                 .step(&vm)
