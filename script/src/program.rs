@@ -68,14 +68,17 @@ pub(crate) enum Constant {
 }
 
 #[derive(Debug)]
-pub(crate) struct Register {
-    pub bits: u32,
+pub(crate) enum Register {
+    Int(u8),
+    Fp32,
+    Str,
+    User(u32),
 }
 
 #[derive(Debug)]
 pub(crate) struct ArrayRegister {
-    pub bits: u32,
-    pub dimensions: Rc<[u32]>,
+    pub value: Register,
+    pub dimensions: Rc<[Register]>,
 }
 
 #[derive(Clone, Debug)]
@@ -387,13 +390,12 @@ impl<'a> ProgramBuilder<'a> {
                 }
                 tyty => {
                     let index = u32::try_from(self.registers.values.len()).unwrap();
-                    let bits = tyty.bit_size();
                     let debug = debug::Register {
                         name: name.clone(),
                         value: value_ty.clone(),
                         line: debug::Source { file, line },
                     };
-                    self.registers.values.push((Register { bits }, debug));
+                    self.registers.values.push((tyty.to_register(), debug));
 
                     let mut regmap = RegisterMap::Unit { index };
 
@@ -435,7 +437,7 @@ impl<'a> ProgramBuilder<'a> {
     fn expand_array_register_group(
         &mut self,
         mut ty: TypeId,
-        dimensions: Rc<[u32]>,
+        dimensions: Rc<[Register]>,
         name: &'a Str,
         index_ty: &'a Str,
         // TODO derive
@@ -460,7 +462,7 @@ impl<'a> ProgramBuilder<'a> {
                 tyty => {
                     let index = u32::try_from(self.array_registers.values.len()).unwrap();
                     let array = ArrayRegister {
-                        bits: tyty.bit_size(),
+                        value: tyty.to_register(),
                         dimensions: dimensions.clone(),
                     };
                     let debug = {
@@ -846,17 +848,16 @@ impl<'a> ProgramBuilder<'a> {
         Ok(n)
     }
 
-    fn type_index_dimensions(&self, ty: TypeId) -> Option<Vec<u32>> {
-        match &self.types[ty] {
-            Type::Int(bits) => 1u32.checked_shl(u32::from(*bits)).map(|n| [n].into()),
-            Type::Fp32 => None,
-            Type::ConstantString => None,
+    fn type_index_dimensions(&self, ty: TypeId) -> Option<Vec<Register>> {
+        let ty = &self.types[ty];
+        match ty {
             // Don't allow indexing on opaque since
             // - the bit length may change at any time
             // - opaque values may represent handles,
             //   and the value referenced may change without the opaque handle itself changing
-            Type::Opaque { .. } => None,
-            Type::Enum { value_to_id } => Some([u32::try_from(value_to_id.len()).unwrap()].into()),
+            Type::Fp32 | Type::ConstantString | Type::Opaque { .. } => None,
+            Type::Int(bits) if *bits >= 32 => None,
+            Type::Int(_) | Type::Enum { .. } => Some([ty.to_register()].into()),
             Type::Group { fields } => {
                 let mut dim = Vec::new();
                 for (_, &v) in fields.iter() {
@@ -1158,4 +1159,47 @@ impl<K, I, T, U> fmt::Debug for IndexMapBuilder<K, I, T, U> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("TODO")
     }
+}
+
+impl Register {
+    pub fn bits(&self) -> u8 {
+        match self {
+            Self::Int(b) => *b,
+            Self::Fp32 => 32,
+            Self::Str => 64,
+            Self::User(n) => u32range_to_bits(*n),
+        }
+    }
+
+    pub fn range(&self) -> Option<u32> {
+        match self {
+            &Self::Int(b) => 1u32.checked_shl(b.into()),
+            Self::Fp32 => None,
+            Self::Str => None,
+            Self::User(n) => Some(*n),
+        }
+    }
+}
+
+impl<'a> Type<'a> {
+    fn to_register(&self) -> Register {
+        match self {
+            Self::Int(b) => Register::Int(*b),
+            Self::Fp32 => Register::Fp32,
+            Self::ConstantString => Register::Str,
+            Self::Opaque { bits } => Register::Int(*bits),
+            Self::Enum { value_to_id } => Register::User(value_to_id.len() as u32),
+            Self::Group { .. } => todo!(),
+        }
+    }
+}
+
+fn u32range_to_bits(max: u32) -> u8 {
+    let mut n = max;
+    n |= n >> 1;
+    n |= n >> 2;
+    n |= n >> 4;
+    n |= n >> 8;
+    n |= n >> 16;
+    n.trailing_ones() as u8
 }

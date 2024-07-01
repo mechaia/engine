@@ -91,12 +91,17 @@ impl WordVM {
 
         for reg in program.registers.iter() {
             register_offsets.push(registers_size);
-            registers_size += words_for_bits(reg.bits);
+            registers_size += words_for_bits(reg.bits());
         }
 
         for reg in program.array_registers.iter() {
             array_register_offsets.push(registers_size);
-            registers_size += words_for_bits(reg.bits) * reg.dimensions.iter().product::<u32>();
+            registers_size += words_for_bits(reg.value.bits())
+                * reg
+                    .dimensions
+                    .iter()
+                    .map(|r| r.range().unwrap())
+                    .product::<u32>();
         }
 
         let mut strings_offsets = Vec::new();
@@ -125,7 +130,7 @@ impl WordVM {
                     let mut instructions = b.instructions.iter().enumerate();
                     while let Some((i, instr)) = instructions.next() {
                         let r = |i: u32| register_offsets[i as usize];
-                        let l = |i: u32| words_for_bits(program.registers[i as usize].bits);
+                        let l = |i: u32| words_for_bits(program.registers[i as usize].bits());
                         match instr {
                             &Instruction::RegisterLoad(from) => {
                                 let &Instruction::RegisterStore(to) =
@@ -157,13 +162,17 @@ impl WordVM {
                             &Instruction::ArrayAccess(array) => {
                                 encoder.op_array_set(array_register_offsets[array as usize]);
                                 let array = &program.array_registers[array as usize];
-                                let element_size = words_for_bits(array.bits);
-                                let mut stride =
-                                    element_size * array.dimensions.iter().product::<u32>();
+                                let element_size = words_for_bits(array.value.bits());
+                                let mut stride = element_size
+                                    * array
+                                        .dimensions
+                                        .iter()
+                                        .map(|r| r.range().unwrap())
+                                        .product::<u32>();
                                 for i in 0.. {
                                     match instructions.next().unwrap().1 {
                                         &Instruction::ArrayIndex(index) => {
-                                            stride /= array.dimensions[i];
+                                            stride /= array.dimensions[i].range().unwrap();
                                             encoder.op_array_add(stride, r(index));
                                         }
                                         &Instruction::RegisterStore(register) => {
@@ -240,7 +249,7 @@ impl WordVM {
                         for &i in s.iter() {
                             let i = usize::try_from(i).unwrap();
                             let reg = &program.registers[i];
-                            for offt in 0..words_for_bits(reg.bits) {
+                            for offt in 0..words_for_bits(reg.bits()) {
                                 instructions.push(register_offsets[i] + offt);
                             }
                         }
@@ -636,8 +645,8 @@ impl OpEncoder {
     }
 }
 
-fn words_for_bits(bits: u32) -> u32 {
-    (bits + 31) / 32
+fn words_for_bits(bits: impl Into<u32>) -> u32 {
+    (bits.into() + 31) / 32
 }
 
 fn slice_u32_as_u8(s: &[u32]) -> &[u8] {
