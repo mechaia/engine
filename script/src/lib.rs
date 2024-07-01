@@ -23,7 +23,6 @@ pub struct Collection {
     registers: Map<Str, Str>,
     /// (Index, Value)
     array_registers: Map<Str, (Str, Str)>,
-    switches: Map<Str, Switch>,
     functions: Map<Str, Function>,
     file_names: Vec<Str>,
 }
@@ -76,21 +75,19 @@ enum ErrorKind {
 }
 
 #[derive(Debug)]
-struct Switch {
-    register: Str,
-    branches: Box<[(Str, Str)]>,
-    default: Option<Str>,
-    file: u32,
-    lines: Box<[u32]>,
-    last_line: u32,
-}
-
-#[derive(Debug)]
 enum Function {
-    User {
+    Block {
         instructions: Box<[Instruction]>,
         /// `None` if return, `Some` if jump.
         next: Option<Str>,
+        file: u32,
+        lines: Box<[u32]>,
+        last_line: u32,
+    },
+    Switch {
+        register: Str,
+        branches: Box<[(Str, Str)]>,
+        default: Option<Str>,
         file: u32,
         lines: Box<[u32]>,
         last_line: u32,
@@ -364,7 +361,7 @@ impl Collection {
             }
         };
 
-        let f = Switch {
+        let f = Function::Switch {
             register: register.into(),
             branches: branches.into(),
             default: default.map(|d| d.into()),
@@ -373,7 +370,7 @@ impl Collection {
             last_line,
         };
 
-        self.switches
+        self.functions
             .try_insert(name.into(), f)
             .map(|_| ())
             .map_err(|e| ErrorKind::DuplicateFunction(e.entry.key().clone().into()))
@@ -449,7 +446,7 @@ impl Collection {
         let last_line = lines.line.try_into().unwrap();
         let (instructions, lines) = <(Vec<_>, Vec<_>)>::from(instructions);
 
-        let f = Function::User {
+        let f = Function::Block {
             instructions: instructions.into(),
             lines: lines.into(),
             file: self.cur_file(),
@@ -629,7 +626,7 @@ fn next_words_eol<const N: usize>(mut s: &str) -> Result<[Str; N], ErrorKind> {
 #[cfg(test)]
 mod test {
     #[test]
-    fn stuff() {
+    fn run() {
         let mut col = super::Collection::default();
         col.add_standard().unwrap();
         let s = include_str!("../examples/array.pil");

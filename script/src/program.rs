@@ -510,7 +510,7 @@ impl<'a> ProgramBuilder<'a> {
         i += 1;
         for (name, f) in collection.functions.iter() {
             match f {
-                crate::Function::User { .. } => {
+                crate::Function::Block { .. } | crate::Function::Switch { .. } => {
                     self.functions.to_index.try_insert(name, i).unwrap();
                     i += 1;
                 }
@@ -519,10 +519,6 @@ impl<'a> ProgramBuilder<'a> {
                     self.functions.to_index.try_insert(name, id).unwrap();
                 }
             }
-        }
-        for (name, _) in collection.switches.iter() {
-            self.functions.to_index.try_insert(name, i).unwrap();
-            i += 1;
         }
 
         // entry stub
@@ -541,7 +537,7 @@ impl<'a> ProgramBuilder<'a> {
 
         for (name, func) in collection.functions.iter() {
             match func {
-                crate::Function::User {
+                crate::Function::Block {
                     instructions: instrs,
                     file: f,
                     last_line: ll,
@@ -594,6 +590,46 @@ impl<'a> ProgramBuilder<'a> {
                     };
                     self.functions.values.push((Function::Block(f), debug));
                 }
+                crate::Function::Switch {
+                    register,
+                    branches,
+                    default,
+                    file,
+                    lines,
+                    last_line,
+                } => {
+                    let (register, ty) = self.register(register)?;
+                    match &self.types[ty] {
+                        Type::ConstantString => todo!(),
+                        Type::Int(_) | Type::Enum { .. } => {
+                            let &RegisterMap::Unit { index: register } = register else {
+                                todo!()
+                            };
+                            let mut cases = Vec::new();
+                            for (value, next) in branches.iter() {
+                                let constant = self.get_or_add_const(ty, value)?;
+                                let function = self.function(next)?;
+                                cases.push(SwitchCase { constant, function });
+                            }
+                            let default = default.as_ref().map(|s| self.function(s)).transpose()?;
+                            let f = FunctionSwitch {
+                                register,
+                                cases: cases.into(),
+                                default,
+                            };
+                            let src = |line| debug::Source { file: *file, line };
+                            let debug = debug::Function {
+                                name: name.clone(),
+                                instruction_to_line: lines.iter().map(|&l| src(l)).collect(),
+                                last_line: src(*last_line),
+                            };
+                            self.functions.values.push((Function::Switch(f), debug));
+                        }
+                        Type::Fp32 => todo!(),
+                        Type::Opaque { .. } => todo!(),
+                        Type::Group { .. } => todo!(),
+                    }
+                }
                 crate::Function::Builtin {
                     id,
                     inputs,
@@ -629,47 +665,6 @@ impl<'a> ProgramBuilder<'a> {
                     })?;
                 }
             };
-        }
-
-        for (name, switch) in collection.switches.iter() {
-            let (register, ty) = self.register(&switch.register)?;
-            match &self.types[ty] {
-                Type::ConstantString => todo!(),
-                Type::Int(_) | Type::Enum { .. } => {
-                    let &RegisterMap::Unit { index: register } = register else {
-                        todo!()
-                    };
-                    let mut cases = Vec::new();
-                    for (value, next) in switch.branches.iter() {
-                        let constant = self.get_or_add_const(ty, value)?;
-                        let function = self.function(next)?;
-                        cases.push(SwitchCase { constant, function });
-                    }
-                    let default = switch
-                        .default
-                        .as_ref()
-                        .map(|s| self.function(s))
-                        .transpose()?;
-                    let f = FunctionSwitch {
-                        register,
-                        cases: cases.into(),
-                        default,
-                    };
-                    let src = |line| debug::Source {
-                        file: switch.file,
-                        line,
-                    };
-                    let debug = debug::Function {
-                        name: name.clone(),
-                        instruction_to_line: switch.lines.iter().map(|&l| src(l)).collect(),
-                        last_line: src(switch.last_line),
-                    };
-                    self.functions.values.push((Function::Switch(f), debug));
-                }
-                Type::Fp32 => todo!(),
-                Type::Opaque { .. } => todo!(),
-                Type::Group { .. } => todo!(),
-            }
         }
 
         Ok(())
