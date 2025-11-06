@@ -1,0 +1,248 @@
+% Int0 0
+% IntSign 0 1 -1
+
+# builtin: int32.nand
+$ int32.nand:x Int32
+$ int32.nand:y Int32
+$ int32.nand:result Int32
+
+# builtin: int32.srl
+$ int32.srl:x Int32
+$ int32.srl:y Int32
+$ int32.srl:result Int32
+
+# builtin: int32.sll
+$ int32.sll:x Int32
+$ int32.sll:y Int32
+$ int32.sll:result Int32
+
+# builtin: int32.sub
+$ int32.sub:x Int32
+$ int32.sub:y Int32
+$ int32.sub:result Int32
+
+# builtin: int32.sign
+$ int32.sign:x Int32
+$ int32.sign:result IntSign
+
+# builtin: int32.divmod
+$ int32.divmod:x Int32
+$ int32.divmod:y Int32
+$ int32.divmod:div Int32
+$ int32.divmod:mod Int32
+
+> int32.add
+. int32.sub:y int32.add:y
++ int32.sub:x 0
+| int32.sub
+. int32.sub:y int32.sub:result
+. int32.sub:x int32.add:x
+| int32.sub
+. int32.add:result int32.sub:result
+<
+$ int32.add:x Int32
+$ int32.add:y Int32
+$ int32.add:result Int32
+
+> int32.neg
+. int32.sub:y int32.neg:x
++ int32.sub:x 0
+| int32.sub
+. int32.neg:result int32.sub:result
+<
+$ int32.neg:x Int32
+$ int32.neg:result Int32
+
+> int32.inc
+. int32.sub:x int32.inc:x
++ int32.sub:y -1
+| int32.sub
+. int32.inc:result int32.sub:result
+<
+$ int32.inc:x Int32
+$ int32.inc:result Int32
+
+> int32.dec
+. int32.sub:x int32.dec:x
++ int32.sub:y 1
+| int32.sub
+. int32.dec:result int32.sub:result
+<
+$ int32.dec:x Int32
+$ int32.dec:result Int32
+
+
+> int32.div
+. int32.divmod:x int32.div:x
+. int32.divmod:y int32.div:y
+| int32.divmod
+. int32.div:result int32.divmod:div
+<
+$ int32.div:x Int32
+$ int32.div:y Int32
+$ int32.div:result Int32
+
+> int32.mod
+. int32.divmod:x int32.mod:x
+. int32.divmod:y int32.mod:y
+| int32.divmod
+. int32.mod:result int32.divmod:mod
+<
+$ int32.mod:x Int32
+$ int32.mod:y Int32
+$ int32.mod:result Int32
+
+
+> int32.cmp
+. int32.sub:x int32.cmp:x
+. int32.sub:y int32.cmp:y
+| int32.sub
+. int32.sign:x int32.sub:result
+| int32.sign
+. int32.cmp:result int32.sign:result
+<
+$ int32.cmp:x Int32
+$ int32.cmp:y Int32
+$ int32.cmp:result IntSign
+
+
+> int32.not
+. int32.nand:x int32.not:x
+. int32.nand:y int32.not:x
+| int32.nand
+. int32.not:result int32.nand:result
+<
+$ int32.not:x Int32
+$ int32.not:result Int32
+
+> int32.and
+. int32.nand:x int32.and:x
+. int32.nand:y int32.and:y
+| int32.nand
+. int32.not:x int32.nand:result
+| int32.not
+. int32.and:result int32.not:result
+<
+$ int32.and:x Int32
+$ int32.and:y Int32
+$ int32.and:result Int32
+
+> int32.or
+. int32.not:x int32.or:x
+| int32.not
+. int32.or:x int32.not:result
+. int32.not:x int32.or:y
+| int32.not
+. int32.nand:y int32.not:result
+. int32.nand:x int32.or:x
+| int32.nand
+. int32.or:result int32.nand:result
+<
+$ int32.or:x Int32
+$ int32.or:y Int32
+$ int32.or:result Int32
+
+> int32.xor
+. int32.or:x int32.xor:x
+. int32.or:y int32.xor:y
+| int32.or
+. int32.xor@t int32.or:result
+. int32.nand:x int32.xor:x
+. int32.nand:y int32.xor:y
+| int32.nand
+. int32.and:x int32.xor@t
+. int32.and:y int32.nand:result
+| int32.and
+. int32.xor:result int32.and:result
+<
+$ int32.xor:x Int32
+$ int32.xor:y Int32
+$ int32.xor:result Int32
+$ int32.xor@t Int32
+
+
+> int32.cmpz
+. int32.cmp:x int32.cmpz:x
++ int32.cmp:y 0
+| int32.cmp
+. int32.cmpz:result int32.cmp:result
+<
+$ int32.cmpz:x Int32
+$ int32.cmpz:result IntSign
+
+
+> int32.is_between
+. int32.le:x int32.is_between:min
+. int32.le:y int32.is_between:x
+| int32.le
+. int32.is_between:result int32.le:result
+. int32.le:x int32.is_between:x
+. int32.le:y int32.is_between:max
+| int32.le
+. int1.and:x int32.le:result
+. int1.and:y int32.is_between:result
+| int1.and
+. int32.is_between:result int1.and:result
+<
+$ int32.is_between:x Int32
+$ int32.is_between:min Int32
+$ int32.is_between:max Int32
+$ int32.is_between:result Int1
+
+
+
+> int16.to_int8_le
+# low
+. int16.to_8:value int16.to_int8_le:value
+| int16.to_8
+. int16.to_int8_le:0 int16.to_8:result
+# high
+. int16.srl:x int16.to_int8_le:value
++ int16.srl:y 8
+| int16.srl
+. int16.to_8:value int16.srl:result
+| int16.to_8
+. int16.to_int8_le:1 int16.to_8:result
+<
+$ int16.to_int8_le:value Int16
+$ int16.to_int8_le:0 Int8
+$ int16.to_int8_le:1 Int8
+
+> int32.to_int16_le
+# low
+. int32.to_16:value int32.to_int16_le:value
+| int32.to_16
+. int32.to_int16_le:0 int32.to_16:result
+# high
+. int32.srl:x int32.to_int16_le:value
++ int32.srl:y 16
+| int32.srl
+. int32.to_16:value int32.srl:result
+| int32.to_16
+. int32.to_int16_le:1 int32.to_16:result
+<
+$ int32.to_int16_le:value Int32
+$ int32.to_int16_le:0 Int16
+$ int32.to_int16_le:1 Int16
+
+> int32.to_int8_le
+. int32.to_int16_le:value int32.to_int8_le:value
+| int32.to_int16_le
+. int32.to_int8_le@t int32.to_int16_le:1
+# low
+. int16.to_int8_le:value int32.to_int16_le:0
+| int16.to_int8_le
+. int32.to_int8_le:0 int16.to_int8_le:0
+. int32.to_int8_le:1 int16.to_int8_le:1
+# high
+. int16.to_int8_le:value int32.to_int8_le@t
+| int16.to_int8_le
+. int32.to_int8_le:2 int16.to_int8_le:0
+. int32.to_int8_le:3 int16.to_int8_le:1
+<
+$ int32.to_int8_le:value Int32
+$ int32.to_int8_le:0 Int8
+$ int32.to_int8_le:1 Int8
+$ int32.to_int8_le:2 Int8
+$ int32.to_int8_le:3 Int8
+$ int32.to_int8_le@t Int16

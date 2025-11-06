@@ -10,7 +10,6 @@ use {
 /// Only remove unused functions and registers.
 pub fn remove_dead(program: &mut Program, mut debug: Option<&mut debug::Program>) {
     sort_pre_order(program, debug.as_deref_mut());
-    remove_unused_sys(program);
     remove_unused_registers(program, debug.as_deref_mut());
 }
 
@@ -23,7 +22,6 @@ pub fn simple(program: &mut Program, mut debug: Option<&mut debug::Program>) {
     break_move_chains(program, debug.as_deref_mut());
     elide_redundant_moves(program, debug.as_deref_mut());
 
-    remove_unused_sys(program);
     remove_unused_registers(program, debug.as_deref_mut());
 }
 
@@ -58,7 +56,7 @@ fn inline(program: &mut Program, mut debug: Option<&mut debug::Program>) {
                 .count()
                 >= b.instructions.len() - 1
             {
-                let max = usize::from(b.next == -1);
+                let max = usize::from(b.next.is_none());
                 if it().filter(|i| matches!(i, Instruction::Call(_))).count() <= max {
                     return true;
                 }
@@ -87,11 +85,9 @@ fn inline(program: &mut Program, mut debug: Option<&mut debug::Program>) {
                             loop {
                                 debug_assert_ne!(address as usize, i);
 
-                                if address < 0 || !should_inline[address as usize] {
-                                    if address != -1 {
-                                        new_instrs.push(Instruction::Call(address));
-                                        i2l.map(|l| new_lines.push(l));
-                                    }
+                                if !should_inline[address as usize] {
+                                    new_instrs.push(Instruction::Call(address));
+                                    i2l.map(|l| new_lines.push(l));
                                     break;
                                 }
 
@@ -107,7 +103,8 @@ fn inline(program: &mut Program, mut debug: Option<&mut debug::Program>) {
                                 }
                                 assert_eq!(new_instrs.len(), new_lines.len());
 
-                                address = b_2.next;
+                                let Some(next) = b_2.next else { break };
+                                address = next;
                             }
                         }
                         instr => {
@@ -122,10 +119,10 @@ fn inline(program: &mut Program, mut debug: Option<&mut debug::Program>) {
                 };
                 let mut d = debug.as_deref_mut().map(|d| &mut d.functions[i]);
 
-                while b.next == -1 {
+                while let Some(next) = &mut b.next {
                     match new_instrs.pop() {
                         Some(Instruction::Call(address)) => {
-                            b.next = address;
+                            *next = address;
                             d.as_deref_mut()
                                 .map(|d| d.last_line = new_lines.pop().unwrap());
                         }
@@ -181,8 +178,8 @@ fn count_function_references(program: &Program) -> Vec<u32> {
 ///
 /// This also removes unreferenced functions.
 fn sort_pre_order(program: &mut Program, debug: Option<&mut debug::Program>) {
-    fn f(new_list: &mut Vec<i32>, program: &Program, index: i32, visited: &mut BitVec) {
-        if index < 0 || visited.get(index as usize).unwrap() {
+    fn f(new_list: &mut Vec<u32>, program: &Program, index: u32, visited: &mut BitVec) {
+        if visited.get(index as usize).unwrap() {
             return;
         }
         visited.set(index as usize, true);
@@ -196,10 +193,10 @@ fn sort_pre_order(program: &mut Program, debug: Option<&mut debug::Program>) {
     let mut new_list = Vec::new();
     f(&mut new_list, program, 0, &mut visited);
 
-    let mut remap_table = vec![i32::MAX; program.functions.len()];
+    let mut remap_table = vec![u32::MAX; program.functions.len()];
 
     for (i, k) in new_list.iter().enumerate() {
-        remap_table[*k as usize] = i as i32;
+        remap_table[*k as usize] = i as u32;
     }
 
     program.functions = new_list
@@ -207,9 +204,7 @@ fn sort_pre_order(program: &mut Program, debug: Option<&mut debug::Program>) {
         .map(|&i| {
             let mut f = mem::take(&mut program.functions[i as usize]);
             visit_funcref_mut(&mut f, |x| {
-                if *x >= 0 {
-                    *x = remap_table[*x as usize]
-                }
+                *x = remap_table[*x as usize]
             });
             f
         })
@@ -224,10 +219,10 @@ fn sort_pre_order(program: &mut Program, debug: Option<&mut debug::Program>) {
 }
 
 /// Visit all function references of the given function, i.e. calls and jumps.
-fn visit_funcref<F: FnMut(i32)>(function: &Function, mut f: F) {
+fn visit_funcref<F: FnMut(u32)>(function: &Function, mut f: F) {
     match function {
         Function::Block(b) => {
-            f(b.next);
+            b.next.map(&mut f);
             for instr in b.instructions.iter() {
                 if let Instruction::Call(address) = instr {
                     f(*address)
@@ -246,10 +241,10 @@ fn visit_funcref<F: FnMut(i32)>(function: &Function, mut f: F) {
 }
 
 /// Visit all function references of the given function, i.e. calls and jumps.
-fn visit_funcref_mut<F: FnMut(&mut i32)>(function: &mut Function, mut f: F) {
+fn visit_funcref_mut<F: FnMut(&mut u32)>(function: &mut Function, mut f: F) {
     match function {
         Function::Block(b) => {
-            f(&mut b.next);
+            b.next.as_mut().map(&mut f);
             for instr in b.instructions.iter_mut() {
                 if let Instruction::Call(address) = instr {
                     f(address)
@@ -263,31 +258,6 @@ fn visit_funcref_mut<F: FnMut(&mut i32)>(function: &mut Function, mut f: F) {
             for c in s.cases.iter_mut() {
                 f(&mut c.function)
             }
-        }
-    }
-}
-
-/// Remove unused system calls
-fn remove_unused_sys(program: &mut Program) {
-    let mut referenced = BitVec::filled(program.sys_to_registers.len(), false);
-    for f in program.functions.iter() {
-        let Function::Block(b) = f else { continue };
-        let mut test_set = |a: i32| {
-            if a < 0 {
-                referenced.set(!a as usize, true);
-            }
-        };
-        for instr in b.instructions.iter() {
-            let Instruction::Call(address) = instr else {
-                continue;
-            };
-            test_set(*address);
-        }
-        test_set(b.next);
-    }
-    for (b, s) in referenced.iter().zip(program.sys_to_registers.iter_mut()) {
-        if !b {
-            *s = None;
         }
     }
 }
@@ -309,13 +279,10 @@ fn remove_unused_registers(program: &mut Program, debug: Option<&mut debug::Prog
                         &Instruction::ArrayAccess(array) => {
                             array_referenced.set(array as usize, true)
                         }
-                        &Instruction::Call(address) => {
-                            if address < 0 {
-                                program.sys_to_registers[!address as usize]
-                                    .iter()
-                                    .flat_map(|m| m.iter_all())
-                                    .for_each(|r| referenced.set(r as usize, true));
-                            }
+                        &Instruction::Call(_) => {}
+                        &Instruction::Sys(id) => {
+                            let info = &program.sys_info[id as usize];
+                            (0..info.input_count.max(info.output_count)).for_each(|r| referenced.set(r as usize, true));
                         }
                         Instruction::ConstantLoad(_) => {}
                     }
@@ -384,15 +351,6 @@ fn remove_unused_registers(program: &mut Program, debug: Option<&mut debug::Prog
         }
     }
 
-    for sys in program.sys_to_registers.iter_mut() {
-        let Some(m) = sys else { continue };
-        let mut it = m.iter_all_mut();
-        while let Some(reg) = it.next() {
-            *reg = remap[*reg as usize];
-            assert_ne!(*reg, u32::MAX);
-        }
-    }
-
     if let Some(d) = debug {
         d.registers = referenced
             .iter()
@@ -410,16 +368,18 @@ fn remove_unused_registers(program: &mut Program, debug: Option<&mut debug::Prog
 }
 
 /// Flatten chain of jumps
-/// e.g. `JUMP X -> JUMP Y -> JUMP Z` becomes `JUMP Z`
-fn flatten_jump(program: &Program, mut start: i32) -> i32 {
-    while start >= 0 {
+/// e.g.
+/// - `JUMP X -> JUMP Y -> JUMP Z` becomes `JUMP Z`
+fn flatten_jump(program: &Program, mut start: u32) -> u32 {
+    loop {
         let Function::Block(b) = &program.functions[start as usize] else {
             break;
         };
         if !b.instructions.is_empty() {
             break;
         }
-        start = b.next;
+        let Some(next) = b.next else { break };
+        start = next;
     }
     start
 }
@@ -515,15 +475,12 @@ fn break_move_chains(program: &mut Program, _debug: Option<&mut debug::Program>)
                     }
                 }
                 Instruction::Call(address) => {
-                    if *address < 0 {
-                        let sys = program.sys_to_registers[!*address as usize]
-                            .as_ref()
-                            .unwrap();
-                        for &i in sys.outputs.iter() {
-                            set_unknown(&mut values, &mut reverse_alias, i)
-                        }
-                    } else {
-                        clear(&mut values, &mut reverse_alias);
+                    clear(&mut values, &mut reverse_alias);
+                }
+                Instruction::Sys(id) => {
+                    let sys = &program.sys_info[*id as usize];
+                    for i in 0..sys.output_count {
+                        set_unknown(&mut values, &mut reverse_alias, i)
                     }
                 }
                 Instruction::ArrayAccess(_) => cur_value = RegisterValue::Unknown,
@@ -575,16 +532,14 @@ fn elide_redundant_moves(program: &mut Program, mut debug: Option<&mut debug::Pr
                     }
                     set.set(reg as usize, false);
                 }
-                Instruction::Call(address) => {
-                    if address < 0 {
-                        let map = program.sys_to_registers[!address as usize]
-                            .as_ref()
-                            .unwrap();
-                        map.outputs.iter().for_each(|&r| set.set(r as usize, true));
-                        map.inputs.iter().for_each(|&r| set.set(r as usize, false));
-                    } else {
-                        set.fill(false);
-                    }
+                Instruction::Call(_) => {
+                    set.fill(false);
+                    new_instrs.push(instr);
+                }
+                Instruction::Sys(id) => {
+                    let info = &program.sys_info[id as usize];
+                    (0..info.output_count).for_each(|r| set.set(r as usize, true));
+                    (0..info.input_count).for_each(|r| set.set(r as usize, false));
                     new_instrs.push(instr);
                 }
                 // TODO
@@ -619,14 +574,12 @@ fn find_read_registers(program: &Program) -> BitVec {
                         Instruction::RegisterLoad(r)
                         | Instruction::ArrayStore(r)
                         | Instruction::ArrayIndex(r) => set.set(r as usize, true),
-                        Instruction::Call(id) => {
-                            if id < 0 {
-                                program.sys_to_registers[!id as usize]
-                                    .as_ref()
-                                    .unwrap()
-                                    .inputs
-                                    .iter()
-                                    .for_each(|&r| set.set(r as usize, true));
+                        Instruction::Call(_) => {},
+                        Instruction::Sys(id) => {
+                            let info = &program.sys_info[id as usize];
+                            // TODO outputs aren't read from. How do we best handle it?
+                            for i in 0..info.input_count.max(info.output_count) {
+                                set.set(i as usize, true);
                             }
                         }
                         _ => {}

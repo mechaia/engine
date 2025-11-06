@@ -673,4 +673,44 @@ mod test {
         }
         todo!();
     }
+
+    #[test]
+    fn to_bytes() {
+        let mut col = super::Collection::default();
+        col.add_standard().unwrap();
+        let s = include_str!("../examples/array.pil");
+        let s = include_str!("../examples/hello_world.pil");
+        let s = include_str!("../examples/group.pil");
+        let s = include_str!("../examples/union.pil");
+        col.parse_text(Some("test.pil"), s).unwrap();
+        let (mut prog, mut debug) =
+            super::Program::from_collection(&col, &"start".to_string().into()).unwrap();
+        super::optimize::simple(&mut prog, Some(&mut debug));
+        let b = prog.to_bytes();
+        for (i, c) in b.chunks(32).enumerate() {
+            let o = i * 32;
+            eprint!("{o:04x} ");
+            for i in 0..32 {
+                if i % 4 == 0 {
+                    eprint!(" ");
+                }
+                if let Some(b) = c.get(i) {
+                    eprint!("{b:02x}");
+                } else {
+                    eprint!("  ");
+                }
+            }
+            eprint!("  ");
+            for &b in c {
+                let b = if b' ' <= b && b <= b'~' {
+                    b as char
+                } else {
+                    '.'
+                };
+                eprint!("{b}");
+            }
+            eprintln!();
+        }
+        todo!();
+    }
 }

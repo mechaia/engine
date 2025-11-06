@@ -949,6 +949,7 @@ dependencies = [
  "mechaia_model",
  "mechaia_physics3d",
  "mechaia_render",
+ "mechaia_script",
  "mechaia_sound",
  "mechaia_util",
  "mechaia_voxel_common",
@@ -1004,6 +1005,13 @@ dependencies = [
  "raw-window-handle 0.6.0",
  "vk-mem",
  "vk-shader-macros",
+]
+
+[[package]]
+name = "mechaia_script"
+version = "0.1.0"
+dependencies = [
+ "mechaia_util",
 ]
 
 [[package]]

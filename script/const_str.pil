@@ -1,0 +1,9 @@
+# builtin: const_str.get
+$ const_str.get:value ConstStr
+$ const_str.get:index Int32
+$ const_str.get:result Int8
+
+# builtin: const_str.len
+$ const_str.len:value ConstStr
+$ const_str.len:result Int32
+

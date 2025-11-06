@@ -12,7 +12,7 @@ pub struct PbrMaterialSet {
 
 pub type TextureHandle = u32;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PbrMaterial {
     pub albedo: Vec4,
     pub roughness: f32,
@@ -22,7 +22,11 @@ pub struct PbrMaterial {
     pub roughness_texture: TextureHandle,
     pub metallic_texture: TextureHandle,
     pub ambient_occlusion_texture: TextureHandle,
+    pub flags: PbrFlags,
 }
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PbrFlags(util::BitMap8);
 
 #[repr(C, align(16))]
 struct PbrMaterialData {
@@ -30,7 +34,7 @@ struct PbrMaterialData {
     roughness: f32,
     metallic: f32,
     ambient_occlusion: f32,
-    _padding: f32,
+    flags: u32,
     albedo_texture_index: u32,
     roughness_texture_id: u32,
     metallic_texture_id: u32,
@@ -67,7 +71,7 @@ impl PbrMaterialSet {
             roughness: material.roughness,
             metallic: material.metallic,
             ambient_occlusion: material.ambient_occlusion,
-            _padding: 0.0,
+            flags: material.flags.0.as_u8().into(),
             albedo_texture_index: material.albedo_texture,
             roughness_texture_id: material.roughness_texture,
             metallic_texture_id: material.metallic_texture,
@@ -97,5 +101,14 @@ impl PbrMaterialSet {
 
     pub fn buffer(&self) -> vk::Buffer {
         self.buffer.0
+    }
+}
+
+impl PbrFlags {
+    const UNLIGHTED: u8 = 0;
+
+    pub fn set_unlighted(&mut self, value: bool) -> &mut Self {
+        self.0.set(Self::UNLIGHTED, value);
+        self
     }
 }

@@ -385,6 +385,9 @@ impl SharedData {
                         data_instances: graphics_data_instance,
                         data_instances_ptr: graphics_data_instance_ptr.cast(),
                         data_transforms: graphics_data_transform,
+                        has_empty_draw_issue: render
+                            .errata
+                            .has_issue(crate::Errata::EMPTY_INDIRECT_DRAWCALLS),
                     },
                     directional_lights_data: DirectionalLight {
                         direction: Vec3::NEG_Z,

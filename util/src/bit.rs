@@ -28,24 +28,51 @@ impl<'a> BitSlice<'a> {
         unsafe { Some(self.get_unchecked(index)) }
     }
 
-    pub fn set(&self, index: usize, value: bool) {
+    pub fn set(&mut self, index: usize, value: bool) {
         assert!(index < self.len, "out of bounds");
         unsafe { self.set_unchecked(index, value) }
+    }
+
+    pub fn replace(&mut self, index: usize, value: bool) -> bool {
+        assert!(index < self.len, "out of bounds");
+        unsafe { self.replace_unchecked(index, value) }
+    }
+
+    pub fn fill(&mut self, value: bool) {
+        unsafe {
+            self.ptr
+                .as_ptr()
+                .write_bytes(u8::MAX * u8::from(value), self.u8_len())
+        }
     }
 
     pub fn len(&self) -> usize {
         self.len
     }
 
+    fn u8_len(&self) -> usize {
+        (self.len + 7) / 8
+    }
+
     unsafe fn get_unchecked(&self, index: usize) -> bool {
         (*self.ptr.as_ptr().add(index / 8) >> (index % 8)) & 1 != 0
     }
 
-    unsafe fn set_unchecked(&self, index: usize, value: bool) {
+    unsafe fn set_unchecked(&mut self, index: usize, value: bool) {
+        self.replace_unchecked(index, value);
+    }
+
+    unsafe fn replace_unchecked(&mut self, index: usize, value: bool) -> bool {
         let p = &mut *self.ptr.as_ptr().add(index / 8);
         let k = index % 8;
-        *p &= !(1 << k);
+
+        let v = *p;
+        let mask = 1 << k;
+
+        *p &= !mask;
         *p |= u8::from(value) << k;
+
+        v & mask != 0
     }
 }
 
@@ -119,7 +146,8 @@ impl BitVec {
                 slice_mut_u8(self.ptr, self.capacity / 8)[self.len / 8].write(u8::from(value))
             };
         } else {
-            unsafe { self.set_unchecked(self.len, value) }
+            let l = self.len;
+            unsafe { self.set_unchecked(l, value) }
         }
         self.len += 1;
     }

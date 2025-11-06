@@ -1,0 +1,39 @@
+== Program Binary ==
+
+A minimal exchange format for executables.
+
+It is designed to be easily converted to native code for systems with
+native 32-bit integers.
+
+
+- Format -
+
+Starts with the 16-byte string "BITCODEPROGRAM\0\0".
+Followed by 16-byte interface UUID.
+Interpretation of interface UUID is interface-/implementation specific.
+
+Follows a list of registers.
+Each register entry is:
+-  1 bit: 0 if user type, 1 if builtin type (ABI specific)
+- 31 bits: maximum register value, inclusive
+- 32 bits: register count
+Minimum register value is always 0.
+
+Finally a list of functions.
+Each function is either a block or a switch.
+
+A block starts with high bit 0 and instruction count.
+Then instructions with 3 MSB operation bits and 29 bit argument:
+- 0 CALL
+- 1
+- 2
+- 3
+- 4
+- 5
+- 6
+- 7 JUMP
+All blocks end with a JUMP instruction
+
+A switch starts with high bit 1 and register index to use as condition,
+default branch with function target,
+then branches with constant to compare with and function targeta.

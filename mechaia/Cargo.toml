@@ -14,12 +14,14 @@ model = { path = "../model", package = "mechaia_model" }
 voxel_common = { path = "../voxel/common", package = "mechaia_voxel_common", optional = true }
 voxel_render = { path = "../voxel/render", package = "mechaia_voxel_render", optional = true }
 input = { path = "../input", package = "mechaia_input", optional = true }
+script = { path = "../script", package = "mechaia_script", optional = true }
 glam = "0.27.0"
 
 [features]
-default = ["client"]
+default = ["client", "script"]
 client = ["render", "sound", "dep:input"]
 render = ["dep:render", "dep:gui", "dep:window"]
+script = ["dep:script"]
 sound = ["dep:sound"]
 voxel = ["dep:voxel_common"]
 voxel_render = ["dep:voxel_render"]

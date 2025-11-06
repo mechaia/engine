@@ -2,7 +2,10 @@ use {
     super::U0d32,
     core::{fmt, ops},
     rand::{
-        distributions::{uniform::{SampleBorrow, SampleUniform, UniformInt, UniformSampler}, Distribution, Standard},
+        distributions::{
+            uniform::{SampleBorrow, SampleUniform, UniformInt, UniformSampler},
+            Distribution, Standard,
+        },
         Rng,
     },
 };
@@ -112,6 +115,14 @@ impl ops::Mul<U0d32> for U32d32 {
 
     fn mul(self, rhs: U0d32) -> Self::Output {
         self * Self::from(rhs)
+    }
+}
+
+impl ops::Mul<U32d32> for U0d32 {
+    type Output = U32d32;
+
+    fn mul(self, rhs: U32d32) -> Self::Output {
+        U32d32::from(self) * rhs
     }
 }
 

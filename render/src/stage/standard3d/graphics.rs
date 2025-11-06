@@ -33,6 +33,7 @@ pub(super) struct Data {
     /// Set by host.
     pub(super) data_instances: VmaBuffer,
     pub(super) data_instances_ptr: NonNull<InstanceData>,
+    pub(super) has_empty_draw_issue: bool,
 }
 
 /// Per-set data
@@ -87,7 +88,21 @@ impl Data {
                 .as_ptr();
             let ic;
             (ic, instance_counts) = instance_counts.split_at(set.mesh_set.len());
-            p.write(ic.iter().filter(|&&n| n > 0).count() as u32);
+            let draw_count = ic.iter().filter(|&&n| n > 0).count() as u32;
+
+            if draw_count == 0 && self.has_empty_draw_issue {
+                let p = set.graphics.per_image[index]
+                    .parameters_ptr
+                    .cast::<u32>()
+                    .as_ptr();
+                p.write(1);
+                p.add(1)
+                    .cast::<vk::DrawIndexedIndirectCommand>()
+                    .write(Default::default());
+                continue;
+            }
+
+            p.write(draw_count as u32);
 
             let mut p = p.add(1).cast::<vk::DrawIndexedIndirectCommand>();
             for (i, &instance_count) in ic.iter().enumerate() {

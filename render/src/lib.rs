@@ -40,11 +40,16 @@ pub struct Render {
     commands: command::Commands,
     command_buffers: Box<[vk::CommandBuffer]>,
     stages: util::Arena<Box<[Box<dyn Stage>]>>,
+    errata: Errata,
 }
 
 struct ImageSamplers {
     nearest: vk::Sampler,
     linear: vk::Sampler,
+}
+
+struct Errata {
+    flags: [util::BitMap8; 1],
 }
 
 pub type VmaBuffer = (vk::Buffer, vk_mem::Allocation);
@@ -149,6 +154,22 @@ impl Drop for Render {
             self.swapchain_draw.drop_with(&self.dev.dev);
             self.commands.drop_with(&self.dev.alloc);
         }
+    }
+}
+
+impl Errata {
+    /// On llvmpipe vkCmdDrawIndexedIndirectCount with count == 0 will result in (some)
+    /// subsequent draws being ignored.
+    /// This issue only appears ingame, renderdoc captures do not exhibit the issue.
+    pub const EMPTY_INDIRECT_DRAWCALLS: (usize, u8) = (0, 0);
+
+    pub fn has_issue(&self, issue: (usize, u8)) -> bool {
+        self.flags[issue.0].get(issue.1)
+    }
+
+    fn add_issue(&mut self, issue: (usize, u8)) {
+        eprintln!("adding issue {:?}", issue);
+        self.flags[issue.0].set(issue.1, true)
     }
 }
 
@@ -386,7 +407,17 @@ fn init(
             .unwrap()
     };
 
-    let (physical_device, _) = select_device(&instance);
+    let (physical_device, physdev_properties) = select_device(&instance);
+
+    let mut errata = Errata {
+        flags: Default::default(),
+    };
+
+    match (physdev_properties.vendor_id, physdev_properties.device_id) {
+        // llvmpipe
+        (0x10005, 0) => errata.add_issue(Errata::EMPTY_INDIRECT_DRAWCALLS),
+        _ => {}
+    }
 
     // Surface
     let surface = unsafe {
@@ -475,6 +506,7 @@ fn init(
         commands,
         command_buffers,
         stages: Default::default(),
+        errata,
     }
 }
 

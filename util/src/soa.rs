@@ -1,4 +1,4 @@
-use core::{marker::PhantomData, ptr::NonNull, slice};
+use core::{marker::PhantomData, ptr::NonNull, slice, fmt};
 use std::alloc::Layout;
 
 pub struct Slice<'a, R> {
@@ -106,6 +106,14 @@ impl<R: Raw> Vec<R> {
         unsafe {
             self.len -= 1;
             Some(self.raw.take_unchecked(self.len))
+        }
+    }
+
+    pub fn swap_remove(&mut self, index: usize) {
+        assert!(index < self.len(), "index out of bounds");
+        let v = self.pop().unwrap();
+        if index < self.len() {
+            self.set(index, v);
         }
     }
 
@@ -231,6 +239,11 @@ pub trait Raw: Copy + sealed::Sealed {
     fn from_slices(slices: Self::ElementSlices<'_>) -> (Self, usize);
 }
 
+#[doc(hidden)]
+pub trait RawClone: Raw {
+    fn ref_to_owned(ref_elem: Self::ElementRef<'_>) -> Self::Element;
+}
+
 // TODO replace with variadic tuples, if we ever get them...
 macro_rules! raw {
     ($name:ident $vec:ident $slice:ident $first:ident $($field:ident $type:ident)*) => {
@@ -311,6 +324,25 @@ macro_rules! raw {
                 }
             }
         }
+
+        impl<$($type,)*> RawClone for $name<$($type,)*>
+        where
+            $($type: Clone,)*
+        {
+            fn ref_to_owned(ref_elem: Self::ElementRef<'_>) -> Self::Element
+            {
+                let ($($field,)*) = ref_elem;
+                ($($field.clone(),)*)
+            }
+        }
+
+        impl<$($type,)*> From<$vec<$($type,)*>> for ($(std::vec::Vec<$type>,)*) {
+            fn from(v: $vec<$($type,)*>) -> Self {
+                unsafe {
+                    ($(std::vec::Vec::from_raw_parts(v.raw.$field.as_ptr(), v.len, v.capacity),)*)
+                }
+            }
+        }
     };
 }
 
@@ -331,4 +363,28 @@ unsafe fn grow<T>(ptr: NonNull<T>, old_size: usize, new_size: usize) -> NonNull<
         std::alloc::alloc(new_layout)
     };
     NonNull::new(ptr).expect("realloc").cast()
+}
+
+// FIXME something is fucked with lifetimes
+impl<R> fmt::Debug for Vec<R>
+where
+    R: Raw,
+    for<'a> R::ElementRef<'a>: fmt::Debug + 'a,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut f = f.debug_list();
+        for e in self.iter() {
+            f.entry(&e);
+        }
+        f.finish()
+    }
+}
+
+impl<R> Clone for Vec<R>
+where
+    R: RawClone,
+{
+    fn clone(&self) -> Self {
+        self.iter().map(R::ref_to_owned).collect()
+    }
 }

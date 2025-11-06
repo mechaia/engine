@@ -8,6 +8,8 @@ layout (constant_id = 1) const uint MAX_DIRECTIONAL_LIGHTS = 1;
 
 const float PI = 3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679;
 
+const uint MATERIAL_FLAG_UNLIGHTED = 1 << 0;
+
 layout (push_constant, std430) uniform Viewport {
 	vec2 inv_viewport;
 	float viewport_y_over_x;
@@ -23,7 +25,7 @@ struct Material {
     float roughness;
     float metallic;
     float ambient_occlusion;
-    float _padding;
+    uint flags;
     uint albedo_texture_index;
     uint roughness_texture_index;
     uint metallic_texture_index;
@@ -114,11 +116,16 @@ vec3 calc_radiance(vec3 ray, vec3 light_color) {
 void main() {
     normal = normalize(normal_unnormalized);
     view_normal = normalize(-position);
-    //view_normal = normalize(position);
 
     Material m = materials[nonuniformEXT(in_material_index)];
 
     vec4 albedo_a = m.albedo * texture(textures_rgba[nonuniformEXT(m.albedo_texture_index)], in_uv);
+
+    if ((m.flags & MATERIAL_FLAG_UNLIGHTED) != 0) {
+        out_color = albedo_a;
+        return;
+    }
+
     albedo = albedo_a.rgb;
     roughness = m.roughness * texture(textures_rgba[nonuniformEXT(m.roughness_texture_index)], in_uv).r;
     metallic = m.metallic * texture(textures_rgba[nonuniformEXT(m.metallic_texture_index)], in_uv).r;
@@ -129,7 +136,6 @@ void main() {
     vec3 outgoing_light = vec3(0);
     for (uint i = 0; i < directional_lights.length(); i++) {
         DirectionalLight light = directional_lights[i];
-        //light.direction = vec3(0, 0, 1);
         outgoing_light += calc_radiance(-light.direction, light.color);
     }
 
@@ -141,9 +147,4 @@ void main() {
     color = pow(color, vec3(1.0/2.2));
 
     out_color = vec4(color, albedo_a.w);
-
-    //out_color.rgb = -normal;
-    //out_color.rgb = position;
-    //out_color.rgb = -position;
-    //out_color.rgb = -position - floor(-position);
 }

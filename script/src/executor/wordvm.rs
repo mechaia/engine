@@ -12,8 +12,8 @@ pub mod debug {
 
     #[derive(Clone, Debug)]
     pub struct WordVM {
-        pub instructions: Box<[Source]>,
-        pub registers: Box<[Source]>,
+        pub(crate) instructions: Box<[Source]>,
+        pub(crate) registers: Box<[Source]>,
     }
 }
 
@@ -22,7 +22,7 @@ pub struct WordVM {
     registers_size: u32,
     stack_size: u32,
     strings_offset: u32,
-    sys_to_registers: Box<[(u32, u32)]>,
+    sys_reg_count: u32,
 }
 
 #[derive(Debug)]
@@ -45,8 +45,8 @@ pub enum Yield {
 #[derive(Default)]
 struct OpEncoder {
     instructions: Vec<u32>,
-    label_to_address: Map<i32, u32>,
-    resolve_label: Map<u32, (Resolve, i32)>,
+    label_to_address: Map<u32, u32>,
+    resolve_label: Map<u32, (Resolve, u32)>,
     resolve_constant: Map<u32, ()>,
 }
 
@@ -62,17 +62,18 @@ const OP4_COND_ANDEQ: u32 = 3;
 const OP4_COND_JUMP: u32 = 4;
 const OP4_JUMP: u32 = 5;
 const OP4_CALL: u32 = 6;
+const OP4_SYS: u32 = 7;
 
 /// index = base
-const OP4_ARRAY_SET: u32 = 9;
+const OP4_ARRAY_SET: u32 = 8;
 /// index += stride * [register]
-const OP4_ARRAY_ADD: u32 = 10;
+const OP4_ARRAY_ADD: u32 = 9;
 /// [register] = [index]
 /// index += 1
-const OP4_ARRAY_LOAD: u32 = 11;
+const OP4_ARRAY_LOAD: u32 = 10;
 /// [index] = [register]
 /// index += 1
-const OP4_ARRAY_STORE: u32 = 12;
+const OP4_ARRAY_STORE: u32 = 11;
 
 const OP4_UNDEF: u32 = 15;
 
@@ -119,7 +120,7 @@ impl WordVM {
             }
         }
 
-        let mut conv = |i: i32, f: &Function| {
+        let mut conv = |i: u32, f: &Function| {
             encoder
                 .label_to_address
                 .try_insert(i, encoder.cur())
@@ -232,42 +233,24 @@ impl WordVM {
         };
 
         for (i, f) in program.functions.iter().enumerate() {
-            let i = i32::try_from(i).unwrap();
-            conv(i, f);
+            conv(i as u32, f);
         }
 
         let (mut instructions, strings_offset) = encoder.finish(&strings_buffer);
         let stack_size = program.max_call_depth();
 
-        let sys_to_registers = program
-            .sys_to_registers
+        let sys_reg_count = program
+            .sys_info
             .iter()
-            .map(|map| {
-                if let Some(map) = map {
-                    let mut f = |s: &[u32]| {
-                        let start = u32::try_from(instructions.len()).unwrap();
-                        for &i in s.iter() {
-                            let i = usize::try_from(i).unwrap();
-                            let reg = &program.registers[i];
-                            for offt in 0..words_for_bits(reg.bits()) {
-                                instructions.push(register_offsets[i] + offt);
-                            }
-                        }
-                        start
-                    };
-                    (f(&map.inputs), f(&map.outputs))
-                } else {
-                    (u32::MAX, u32::MAX)
-                }
-            })
-            .collect();
+            .flat_map(|info| [info.input_count, info.output_count])
+            .fold(0, |s, x| s.max(x));
 
         let vm = Self {
             instructions: instructions.into(),
             registers_size,
             stack_size,
             strings_offset,
-            sys_to_registers,
+            sys_reg_count,
         };
 
         let debug = debug.map(|_| debug::WordVM {
@@ -287,13 +270,6 @@ impl WordVM {
             array_index: 0,
             compare_state: 0,
         }
-    }
-
-    pub(crate) fn sys_registers(&self, id: u32) -> (u32, u32) {
-        self.sys_to_registers
-            .get(usize::try_from(id).unwrap())
-            .copied()
-            .unwrap_or((u32::MAX, u32::MAX))
     }
 
     pub fn constant(&self, offset: u32) -> Result<u32, Error> {
@@ -357,15 +333,15 @@ impl fmt::Debug for WordVM {
                     }
                 }
                 OP4_COND_JUMP => {
-                    let address = *op as i32 >> 4;
+                    let address = *op >> 4;
                     write!(f, "C.JUMP  {address}")?
                 }
                 OP4_JUMP => {
-                    let address = *op as i32 >> 4;
+                    let address = *op >> 4;
                     write!(f, "JUMP    {address}\n")?
                 }
                 OP4_CALL => {
-                    let address = *op as i32 >> 4;
+                    let address = *op >> 4;
                     write!(f, "CALL    {address}")?
                 }
                 OP4_ARRAY_SET => write!(f, "A.SET   {}", op >> 4)?,
@@ -384,17 +360,11 @@ impl fmt::Debug for WordVM {
             f.write_str("\n")?;
         }
 
-        let strings_buffer_end = self
-            .sys_to_registers
-            .iter()
-            .filter(|(x, _)| *x != u32::MAX)
-            .flat_map(|&(x, y)| [x, y])
-            .min()
-            .unwrap_or(self.instructions.len() as u32);
+        let strings_buffer_end = self.instructions.len();
 
         f.write_str("strings buffer: ")?;
         for c in slice_u32_as_u8(
-            &self.instructions[self.strings_offset as usize..strings_buffer_end as usize],
+            &self.instructions[self.strings_offset as usize..strings_buffer_end],
         ) {
             // FIXME bruh
             write!(f, "{}", *c as char)?;
@@ -412,13 +382,7 @@ impl fmt::Debug for WordVM {
             write!(f, "{i:>7}: {n}\n")?;
         }
 
-        f.write_str("sys register map:\n")?;
-        for (id, &(input, output)) in self.sys_to_registers.iter().enumerate() {
-            if input == u32::MAX {
-                continue;
-            }
-            write!(f, "{id:>7}: {input}, {output}\n")?;
-        }
+        write!(f, "sys register count: {}", self.sys_reg_count)?;
 
         Ok(())
     }
@@ -467,28 +431,24 @@ impl WordVMState {
             }
             OP4_COND_JUMP => {
                 if self.compare_state != 0 {
-                    let address = op as i32 >> 4;
-                    if let Some(yld) = self.step_do_jump(address)? {
-                        return Ok(yld);
-                    }
+                    let address = op >> 4;
+                    self.instruction_index = address;
                 }
             }
             OP4_JUMP => {
-                let address = op as i32 >> 4;
-                if let Some(yld) = self.step_do_jump(address)? {
-                    return Ok(yld);
-                }
+                let address = op >> 4;
+                self.instruction_index = address;
+            }
+            OP4_SYS => {
+                let id = op >> 4;
+                return Ok(Yield::Sys { id });
             }
             OP4_CALL => {
-                let address = op as i32 >> 4;
-                if address < 0 {
-                    return Ok(Yield::Sys { id: !address as _ });
-                } else {
-                    let p = self.stack.get_mut(self.stack_index as usize).ok_or(Error)?;
-                    *p = self.instruction_index;
-                    self.stack_index += 1;
-                    self.instruction_index = address as _;
-                }
+                let address = op >> 4;
+                let p = self.stack.get_mut(self.stack_index as usize).ok_or(Error)?;
+                *p = self.instruction_index;
+                self.stack_index += 1;
+                self.instruction_index = address as _;
             }
             OP4_ARRAY_SET => self.array_index = op >> 4,
             OP4_ARRAY_ADD => {
@@ -508,22 +468,6 @@ impl WordVMState {
             _ => return Err(Error),
         }
         Ok(Yield::Preempt)
-    }
-
-    fn step_do_jump(&mut self, address: i32) -> Result<Option<Yield>, Error> {
-        if address < 0 {
-            if self.stack_index == 0 {
-                // set instruction index to invalid address as safeguard
-                self.instruction_index = u32::MAX;
-            } else {
-                self.stack_index -= 1;
-                self.instruction_index = *self.stack.get(self.stack_index as usize).ok_or(Error)?;
-            }
-            Ok(Some(Yield::Sys { id: !address as _ }))
-        } else {
-            self.instruction_index = address as _;
-            Ok(None)
-        }
     }
 
     pub fn register(&self, offset: u32) -> Result<u32, Error> {
@@ -547,6 +491,12 @@ impl OpEncoder {
         self.instructions.len().try_into().unwrap()
     }
 
+    fn resolve_shift4(&self, label: u32) {
+        self.resolve_label
+            .try_insert(self.cur(), (Resolve::Shift4, label))
+            .unwrap();
+    }
+
     fn op_move(&mut self, from: u32, to: u32) {
         self.instructions
             .extend_from_slice(&[OP4_MOVE | (to << 4), from]);
@@ -557,26 +507,18 @@ impl OpEncoder {
             .extend_from_slice(&[OP4_SET | (to << 4), value]);
     }
 
-    fn op_call(&mut self, address: i32) {
-        if address < 0 {
-            self.instructions.push(OP4_CALL | (address << 4) as u32);
-        } else {
-            self.resolve_label
-                .try_insert(self.cur(), (Resolve::Shift4, address))
-                .unwrap();
-            self.instructions.push(OP4_CALL);
-        }
+    fn op_sys(&mut self, id: u32) {
+        self.instructions.push(OP4_SYS | id << 4);
     }
 
-    fn op_jump(&mut self, address: i32) {
-        if address < 0 {
-            self.instructions.push(OP4_JUMP | (address << 4) as u32);
-        } else {
-            self.resolve_label
-                .try_insert(self.cur(), (Resolve::Shift4, address))
-                .unwrap();
-            self.instructions.push(OP4_JUMP);
-        }
+    fn op_call(&mut self, address: u32) {
+        self.resolve_shift4(address);
+        self.instructions.push(OP4_CALL);
+    }
+
+    fn op_jump(&mut self, address: u32) {
+        self.resolve_shift4(address);
+        self.instructions.push(OP4_JUMP);
     }
 
     fn op_cond_eq(&mut self, register: u32, value: u32) {
@@ -590,16 +532,9 @@ impl OpEncoder {
             .extend_from_slice(&[OP4_COND_ANDEQ | (register << 4), value]);
     }
 
-    fn op_cond_jump(&mut self, address: i32) {
-        if address < 0 {
-            self.instructions
-                .push(OP4_COND_JUMP | (address << 4) as u32);
-        } else {
-            self.resolve_label
-                .try_insert(self.cur(), (Resolve::Shift4, address))
-                .unwrap();
-            self.instructions.push(OP4_COND_JUMP);
-        }
+    fn op_cond_jump(&mut self, address: u32) {
+        self.resolve_shift4(address);
+        self.instructions.push(OP4_COND_JUMP);
     }
 
     fn op_array_set(&mut self, base: u32) {

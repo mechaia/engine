@@ -3,6 +3,7 @@
 pub mod bit;
 pub mod math;
 pub mod soa;
+pub mod str;
 pub mod sync;
 
 pub use num_complex::Complex32 as Complex;
@@ -42,6 +43,10 @@ impl BitMap8 {
         self.0 &= !(1 << index);
         self.0 |= u8::from(value) << index;
     }
+
+    pub fn as_u8(&self) -> u8 {
+        self.0
+    }
 }
 
 pub struct Arena<T> {
@@ -56,12 +61,16 @@ impl ArenaHandle {
         self.0.get() - 1
     }
 
+    pub fn from_u32(n: u32) -> Self {
+        Self(NonZeroU32::new(n + 1).unwrap())
+    }
+
     fn as_index(&self) -> usize {
         usize::try_from(self.0.get()).unwrap() - 1
     }
 
     fn from_index(index: usize) -> Self {
-        ArenaHandle(NonZeroU32::new(u32::try_from(index + 1).unwrap()).unwrap())
+        Self::from_u32(u32::try_from(index).unwrap())
     }
 }
 
@@ -92,6 +101,10 @@ impl<T> IndexMut<ArenaHandle> for Arena<T> {
 }
 
 impl<T> Arena<T> {
+    pub const fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
     pub fn insert(&mut self, value: T) -> ArenaHandle {
         if let Some(i) = self.buf.iter_mut().position(|e| e.is_none()) {
             self.buf[i] = Some(value);
@@ -241,11 +254,15 @@ impl Transform {
 }
 
 impl TransformScale {
-    pub const IDENTITY: Self = Self {
-        translation: Vec3::ZERO,
-        scale: 1.0,
-        rotation: Quat::IDENTITY,
-    };
+    pub const IDENTITY: Self = Self::new(Vec3::ZERO, Quat::IDENTITY, 1.0);
+
+    pub const fn new(translation: Vec3, rotation: Quat, scale: f32) -> Self {
+        Self {
+            translation,
+            rotation,
+            scale,
+        }
+    }
 
     pub fn with_translation(&self, translation: Vec3) -> Self {
         Self {
@@ -272,11 +289,7 @@ impl TransformScale {
 
 impl From<Transform> for TransformScale {
     fn from(value: Transform) -> Self {
-        Self {
-            translation: value.translation,
-            rotation: value.rotation,
-            scale: 1.0,
-        }
+        Self::new(value.translation, value.rotation, 1.0)
     }
 }
 
@@ -309,3 +322,34 @@ impl<T, const CHUNK_SIZE: usize> Default for ChunkedVec<T, CHUNK_SIZE> {
         }
     }
 }
+
+#[derive(Clone, Debug, Default)]
+pub struct LinearSet<T> {
+    set: Vec<T>,
+}
+
+impl<T: Eq> LinearSet<T> {
+    pub fn insert(&mut self, value: T) {
+        if !self.set.contains(&value) {
+            self.set.push(value);
+        }
+    }
+
+    pub fn remove(&mut self, value: &T) {
+        for (i, v) in self.set.iter().enumerate() {
+            if v == value {
+                self.set.swap_remove(i);
+                break;
+            }
+        }
+    }
+
+    pub fn drain(&mut self) -> impl Iterator<Item = T> + '_ {
+        self.set.drain(..)
+    }
+
+    pub fn clear(&mut self) {
+        self.set.clear();
+    }
+}
+

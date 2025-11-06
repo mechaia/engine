@@ -276,18 +276,28 @@ impl Physics {
         body: RigidBodyHandle,
         properties: &SetRigidBodyProperties,
     ) {
+        let body = &mut self.rigid_body_set[body.0];
         if let Some(v) = properties.world_transform {
-            self.rigid_body_set[body.0].set_position(transform_to_isometry(v), true);
+            body.set_position(transform_to_isometry(v), true);
         }
         if let Some(v) = properties.linear_velocity {
-            self.rigid_body_set[body.0].set_linvel(glam_to_vector(v), true);
+            body.set_linvel(glam_to_vector(v), true);
         }
         if let Some(v) = properties.angular_velocity {
-            self.rigid_body_set[body.0].set_angvel(glam_to_vector(v), true);
+            body.set_angvel(glam_to_vector(v), true);
         }
         if let Some(v) = properties.enable_ccd {
-            self.rigid_body_set[body.0].enable_ccd(v);
+            body.enable_ccd(v);
         }
+    }
+
+    pub fn set_rigid_body_transform(
+        &mut self,
+        body: RigidBodyHandle,
+        transform: &Transform,
+    ) {
+        let trf = transform_to_isometry(*transform);
+        self.rigid_body_set[body.0].set_position(trf, true);
     }
 
     // FIXME we should discourage direct queries

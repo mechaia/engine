@@ -1,4 +1,4 @@
 > start
-+ const_str:0 "Hello, world!"
++ write.const_str:value "Hello,\sworld!"
 | write.const_str
 = write.newline

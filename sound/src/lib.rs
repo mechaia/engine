@@ -100,7 +100,6 @@ impl Dev {
                     if host.id() == cpal::HostId::Alsa {
                         // fix retardedness
                         let n = n.next_power_of_two();
-                        dbg!(n);
                         break 'buffer_size cpal::BufferSize::Fixed(n.clamp(min, max));
                     }
                     cpal::BufferSize::Fixed(n.clamp(min, max))
@@ -122,6 +121,7 @@ impl Dev {
             .build_output_stream(
                 &cfg,
                 move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                    let t = _info.timestamp();
                     reader(data, channel_count, dt)
                 },
                 err_fn,
