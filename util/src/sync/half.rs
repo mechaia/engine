@@ -122,7 +122,7 @@ where
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
-        let ptr: *mut HalfData<T> = ptr::from_raw_parts_mut(ptr.cast(), metadata);
+        let ptr: *mut HalfData<T> = ptr::from_raw_parts_mut(ptr.cast::<()>(), metadata);
 
         ptr::addr_of_mut!((*ptr).flags).write(super::FastAtomic::new(
             Left::FLAG_LIVE_BIT | Right::FLAG_LIVE_BIT,
@@ -144,6 +144,6 @@ where
 }
 
 unsafe fn layout<T: ?Sized + ptr::Pointee>(metadata: T::Metadata) -> Layout {
-    let stub_ptr: *const T = ptr::from_raw_parts(ptr::null(), metadata);
+    let stub_ptr: *const T = ptr::from_raw_parts(ptr::null::<()>(), metadata);
     Layout::for_value_raw(stub_ptr)
 }

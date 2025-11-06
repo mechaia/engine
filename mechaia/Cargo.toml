@@ -18,7 +18,7 @@ script = { path = "../script", package = "mechaia_script", optional = true }
 glam = "0.27.0"
 
 [features]
-default = ["client", "script"]
+default = ["client"]
 client = ["render", "sound", "dep:input"]
 render = ["dep:render", "dep:gui", "dep:window"]
 script = ["dep:script"]

@@ -6,7 +6,8 @@ members = [
 	"terrain",
 	"util", "physics3d", "window",
 	"mechaia", "gui", "sound", "model",
-	"voxel/render", "voxel/common", "input", "script",
+	"voxel/render", "voxel/common", "input",
+	"script",
 ]
 
 [profile.dev.package."*"]
