@@ -77,7 +77,7 @@ unsafe extern "system" fn vulkan_debug_utils_callback(
     eprintln!("\x1b[{color}m[{ty}:{severity}] {message}\x1b[39m");
     if message_severity == vk::DebugUtilsMessageSeverityFlagsEXT::ERROR {
         eprintln!("{:}", Backtrace::force_capture());
-        std::process::exit(2);
+        //std::process::exit(2);
     }
     vk::FALSE
 }
